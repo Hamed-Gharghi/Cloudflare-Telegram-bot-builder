@@ -16,7 +16,7 @@ Please open a [GitHub Issue](https://github.com/Hamed-Gharghi/Cloudflare-Telegra
 
 ---
 
-## Known Limitations (v1.0)
+## Known Limitations (v1.3)
 
 | Topic | Limitation |
 |---|---|
@@ -24,8 +24,11 @@ Please open a [GitHub Issue](https://github.com/Hamed-Gharghi/Cloudflare-Telegra
 | **Password recovery** | No built-in reset. Recovery means editing D1 data or redeploying with a fresh setup. |
 | **Media size** | Maximum **15MB** per file (KV value limits + Base64 encoding overhead). |
 | **Media privacy** | Media file endpoints are intentionally **public**. URLs are not listed publicly, but anyone who has the URL can fetch the file. |
+| **Broadcast** | Free-plan Workers have a limited subrequest budget. Broadcasts typically send up to **~40 recipients per request**. |
+| **KV consistency** | Log and subscriber lists can lag briefly after writes (eventual consistency). |
+| **Child Workers** | Upgrading the parent `worker.js` does not update already-deployed bots until you click **Deploy** again. |
 | **Cloudflare Free plan** | Roughly **100,000 Worker requests/day**. Each deployed bot runs as its own Worker and shares account quotas. |
-| **Deploy model** | v1 is **paste-and-deploy** (`worker.js` into the Cloudflare editor). This repo does not ship Wrangler/npm local tooling. |
+| **Deploy model** | Paste-and-deploy (`worker.js` into the Cloudflare editor). This repo does not ship Wrangler/npm local tooling. |
 | **Password hashing** | SHA-256 with a fixed application salt — adequate for a personal admin panel, not a multi-tenant SaaS password store. |
 | **Sessions** | JWTs expire after **7 days**. |
 
