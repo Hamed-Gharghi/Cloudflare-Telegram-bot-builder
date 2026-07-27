@@ -416,28 +416,10 @@ Until the files exist, GitHub will show broken-image icons — that is expected.
 
 ## 🏗️ Architecture
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                  Cloudflare Worker                       │
-│  ┌───────────────────────────────────────────────────┐  │
-│  │              HG-TeleFlare App (worker.js)          │  │
-│  │  ┌─────────┐  ┌──────────┐  ┌────────────────┐   │  │
-│  │  │  Router  │  │  Dashboard │  │  Bot Code Gen  │   │  │
-│  │  │ (Hono)   │  │ (HTML/JS) │  │  (Generator)   │   │  │
-│  │  └────┬────┘  └──────────┘  └───────┬────────┘   │  │
-│  │       │                              │            │  │
-│  │  ┌────▼─────────────────────────────▼────────┐   │  │
-│  │  │          CFClient (API Layer)              │   │  │
-│  │  └────┬──────────┬──────────┬──────────────┘   │  │
-│  └───────┼──────────┼──────────┼──────────────────┘  │
-│          │          │          │                      │
-│          ▼          ▼          ▼                      │
-│  ┌──────────┐ ┌──────────┐ ┌──────────────────┐      │
-│  │   D1 DB  │ │  KV KV   │ │  Deployed Bots   │      │
-│  │ (SQLite)  │ │ (Cache)  │ │  (Child Workers) │      │
-│  └──────────┘ └──────────┘ └──────────────────┘      │
-└─────────────────────────────────────────────────────────┘
-```
+<div align="center">
+  <img src="./diagram.png" alt="HG-TeleFlare Architecture Diagram" width="920" />
+  <p><em>High-level architecture of HG-TeleFlare (Router, Dashboard, Bot Generator, CFClient, and storage/services).</em></p>
+</div>
 
 ### Data Flow
 
