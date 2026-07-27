@@ -389,9 +389,7 @@ You're now inside the **HG-TeleFlare Dashboard**. Here's what to do next:
 
 ## 📸 Screenshots
 
-Put your images in the [`docs/screenshots/`](./docs/screenshots/) folder using the filenames below. After you upload them to GitHub, they will show here automatically.
-
-### Setup Wizard (5-step flow)
+### Setup Wizard
 
 | Step | Screenshot | Description |
 |------|------------|-------------|
@@ -399,12 +397,11 @@ Put your images in the [`docs/screenshots/`](./docs/screenshots/) folder using t
 | 2️⃣ | ![Step 2 - Verify Token](./docs/screenshots/02-setup-verify.png) | Paste token and verify with Cloudflare API |
 | 3️⃣ | ![Step 3 - Select Account](./docs/screenshots/03-setup-account.png) | Choose your Cloudflare account |
 | 4️⃣ | ![Step 4 - Initializing](./docs/screenshots/04-setup-progress.png) | Auto-provisioning D1, KV, and running migrations |
-| 5️⃣ | ![Step 5 - Complete](./docs/screenshots/05-setup-complete.png) | Setup complete! Register your admin account |
+| 5️⃣ | ![Step 5 - Complete](./docs/screenshots/05-setup-complete.png) | Setup complete — register your admin account |
 
+### Dashboard
 
-### Main Dashboard
-
-| Preview | What to capture |
+| Preview | Description |
 |---|---|
 | ![Dashboard](./docs/screenshots/06-dashboard.png) | Main dashboard with your bots list |
 | ![Rule Builder](./docs/screenshots/07-rule-builder.png) | Visual rule builder (trigger + action) |
