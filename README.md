@@ -391,26 +391,23 @@ You're now inside the **HG-TeleFlare Dashboard**. Here's what to do next:
 
 Put your images in the [`docs/screenshots/`](./docs/screenshots/) folder using the filenames below. After you upload them to GitHub, they will show here automatically.
 
+### Setup Wizard (5-step flow)
+
+| Step | Screenshot | Description |
+|------|------------|-------------|
+| 1️⃣ | ![Step 1 - Create Token](./docs/screenshots/01-setup-token.png) | Create Cloudflare API token with 1-click permissions |
+| 2️⃣ | ![Step 2 - Verify Token](./docs/screenshots/02-setup-verify.png) | Paste token and verify with Cloudflare API |
+| 3️⃣ | ![Step 3 - Select Account](./docs/screenshots/03-setup-account.png) | Choose your Cloudflare account |
+| 4️⃣ | ![Step 4 - Initializing](./docs/screenshots/04-setup-progress.png) | Auto-provisioning D1, KV, and running migrations |
+| 5️⃣ | ![Step 5 - Complete](./docs/screenshots/05-setup-complete.png) | Setup complete! Register your admin account |
+
+
+### Main Dashboard
+
 | Preview | What to capture |
 |---|---|
-| ![Setup Wizard](./docs/screenshots/01-setup-wizard.png) | Setup wizard — API token / account step |
-| ![Dashboard](./docs/screenshots/02-dashboard.png) | Main dashboard with your bots list |
-| ![Rule Builder](./docs/screenshots/03-rule-builder.png) | Visual rule builder (trigger + action) |
-
-<details>
-<summary>How to add screenshots</summary>
-
-1. Deploy HG-TeleFlare and open your Worker URL.
-2. Take 3 screenshots (PNG or JPG is fine).
-3. Save them locally as:
-   - `docs/screenshots/01-setup-wizard.png`
-   - `docs/screenshots/02-dashboard.png`
-   - `docs/screenshots/03-rule-builder.png`
-4. Upload that folder with the rest of the repo.
-
-Until the files exist, GitHub will show broken-image icons — that is expected.
-
-</details>
+| ![Dashboard](./docs/screenshots/06-dashboard.png) | Main dashboard with your bots list |
+| ![Rule Builder](./docs/screenshots/07-rule-builder.png) | Visual rule builder (trigger + action) |
 
 ---
 
