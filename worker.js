@@ -3383,7 +3383,7 @@ app.post('/api/bots/:id/deploy', authMiddleware, async (c) => {
     if (bots.length === 0) return c.json({ error: 'Bot not found' }, 404);
 
     const bot = bots[0];
-    const botRules = await cf.d1Query('SELECT * FROM rules WHERE bot_id = ? ORDER BY priority ASC', [botId]);
+    const botRules = await cf.d1Query('SELECT * FROM rules WHERE bot_id = ? ORDER BY priority ASC, id ASC', [botId]);
     if (botRules.length === 0) return c.json({ error: 'Add at least one rule before deploying' }, 400);
 
     const scriptName = `tb-${(bot.bot_username || String(botId)).toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')}`;
@@ -4745,7 +4745,7 @@ app.get('/', (c) => {
             <label>Cloudflare API Token</label>
             <input class="form-input" id="setupApiToken" type="password" placeholder="Paste your API token here">
           </div>
-          <button class="btn btn-primary" style="width:100%" onclick="verifyAndShowAccounts()">Verify Token</button>
+          <button class="btn btn-primary" style="width:100%" onclick="verifyAndShowAccounts(event)">Verify Token</button>
         \`;
       } else if (step === 3) {
         content.innerHTML = \`
@@ -4765,13 +4765,15 @@ app.get('/', (c) => {
       }
     }
 
-    async function verifyAndShowAccounts() {
+    async function verifyAndShowAccounts(ev) {
       const apiToken = document.getElementById('setupApiToken').value.trim();
       const statusEl = document.getElementById('setupStatus');
+      const btn = eventButton(ev);
       if (!apiToken) { statusEl.className = 'setup-status error'; statusEl.textContent = 'Please enter an API token'; return; }
 
       statusEl.className = 'setup-status loading';
       statusEl.innerHTML = '<span class="spinner"></span> Verifying token...';
+      setButtonLoading(btn, true, 'Verifying...');
 
       try {
         const data = await fetch('/api/setup/verify-token', {
@@ -4845,6 +4847,8 @@ app.get('/', (c) => {
       } catch (e) {
         statusEl.className = 'setup-status error';
         statusEl.textContent = 'Error: ' + e.message;
+      } finally {
+        setButtonLoading(btn, false);
       }
     }
 
@@ -5473,20 +5477,23 @@ app.get('/', (c) => {
         <p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:16px">
           Get your bot token from <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a> on Telegram.
         </p>
-        <button class="btn btn-primary" style="width:100%" onclick="createBot()">Validate & Create</button>
+        <button class="btn btn-primary" style="width:100%" onclick="createBot(event)">Validate & Create</button>
       \`;
       document.getElementById('modalOverlay').classList.add('show');
     }
 
-    async function createBot() {
+    async function createBot(ev) {
       const token = document.getElementById('newBotToken').value.trim();
+      const btn = eventButton(ev);
       if (!token) { toast('Please enter a bot token', 'error'); return; }
+      setButtonLoading(btn, true, 'Validating...');
       try {
         await api('/bots', { method: 'POST', body: JSON.stringify({ botToken: token }) });
         toast('Bot created successfully!', 'success');
         closeModal();
         showBotsList();
       } catch (e) { toast(e.message, 'error'); }
+      finally { setButtonLoading(btn, false); }
     }
 
     function showEditBotModal(botId) {
@@ -5560,6 +5567,24 @@ app.get('/', (c) => {
       buttons.forEach(btn => setButtonLoading(btn, true, 'Deploying...'));
       toast('Deploying bot... This may take a moment.', 'info');
       try {
+        // Always refresh latest bot/rules before deploy to avoid deploying stale state
+        // right after creating/editing a rule.
+        let latest = await api('/bots/' + botId);
+        let latestRules = latest.rules || [];
+        if (state._lastRuleSavedAt && (Date.now() - state._lastRuleSavedAt) < 3000) {
+          // Small read-after-write buffer for edge propagation.
+          await new Promise((resolve) => setTimeout(resolve, 700));
+          latest = await api('/bots/' + botId);
+          latestRules = latest.rules || [];
+        }
+        if (!latestRules.length) {
+          throw new Error('No rules found yet. Save at least one rule, wait a second, then deploy.');
+        }
+        if (state.currentBot && state.currentBot.id === botId) {
+          state.currentBot = latest.bot || state.currentBot;
+          state.currentRules = latestRules;
+        }
+
         const data = await api('/bots/' + botId + '/deploy', { method: 'POST' });
         let msg = data.message || 'Bot deployed!';
         if (data.workerUrl) msg += ' URL: ' + data.workerUrl;
@@ -6471,9 +6496,10 @@ app.get('/', (c) => {
           await api('/bots/' + state.currentBot.id + '/rules', { method: 'POST', body: JSON.stringify(payload) });
           toast('Rule added!', 'success');
         }
+        state._lastRuleSavedAt = Date.now();
         closeModal();
         showPageLoading('Updating rules', 'Refreshing builder...');
-        showBotBuilder(state.currentBot.id);
+        await showBotBuilder(state.currentBot.id);
       } catch (e) {
         toast(e.message, 'error');
         setButtonLoading(saveBtn, false);
