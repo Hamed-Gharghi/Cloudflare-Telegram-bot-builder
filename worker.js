@@ -2957,13 +2957,49 @@ async function executeAction(env, update, actionType, params) {
 
     case 'fetch_api':
       try {
-        const apiRes = await fetch(params.api_url || '', {
+        // Normalize common paste mistakes (Windows backslashes, missing scheme)
+        let apiUrl = String(params.api_url || '').trim().replace(/\\\\/g, '/');
+        if (apiUrl && !/^https?:\\/\\//i.test(apiUrl) && /^[a-z0-9.-]+\\//i.test(apiUrl)) {
+          apiUrl = 'https://' + apiUrl;
+        }
+        if (!/^https?:\\/\\//i.test(apiUrl)) {
+          await reply(env, chatId, '❌ API URL must start with https:// (example: https://official-joke-api.appspot.com/random_joke)');
+          break;
+        }
+        const apiRes = await fetch(apiUrl, {
           method: params.method || 'GET',
           headers: { 'Content-Type': 'application/json' },
           body: params.method === 'POST' ? (params.body || '{}') : undefined,
         });
         const data = await apiRes.json();
-        await reply(env, chatId, JSON.stringify(data, null, 2).slice(0, 4000));
+        const mode = String(params.response_mode || 'raw').toLowerCase();
+        const template = String(params.response_template || '').trim();
+        let out = '';
+        if (mode === 'template' && template) {
+          const tgKeys = { first_name:1, last_name:1, username:1, user_id:1, message:1, chat_title:1, chat_id:1, date:1 };
+          out = template.replace(/\\{([a-zA-Z0-9_.]+)\\}/g, function(match, key) {
+            if (tgKeys[key]) return match; // leave for replaceVariables
+            if (key === 'json') {
+              try { return JSON.stringify(data, null, 2); } catch (_) { return String(data); }
+            }
+            // Nested path support: {setup}, {user.name}, etc.
+            const parts = String(key).split('.');
+            let cur = data;
+            for (let i = 0; i < parts.length; i++) {
+              if (cur == null || typeof cur !== 'object') { cur = undefined; break; }
+              cur = cur[parts[i]];
+            }
+            if (cur === undefined || cur === null) return '';
+            if (typeof cur === 'object') {
+              try { return JSON.stringify(cur); } catch (_) { return String(cur); }
+            }
+            return String(cur);
+          });
+          out = replaceVariables(out, update);
+        } else {
+          out = JSON.stringify(data, null, 2);
+        }
+        await reply(env, chatId, String(out).slice(0, 4000));
       } catch (e) {
         await reply(env, chatId, '❌ API request failed: ' + e.message);
       }
@@ -6092,7 +6128,7 @@ app.get('/', (c) => {
     function snapshotRuleForm() {
       const ids = [
         'actionText', 'actionButtons', 'actionKeyboardType', 'actionDataKey', 'actionDataValue',
-        'actionApiUrl', 'actionApiMethod', 'actionApiBody', 'actionAdminId',
+        'actionApiUrl', 'actionApiMethod', 'actionApiBody', 'actionApiResponseMode', 'actionApiResponseTemplate', 'actionAdminId',
         'actionPhotoUrl', 'actionCaption', 'actionDocUrl', 'actionDocCaption', 'actionStateName',
       ];
       const fields = {};
@@ -6128,6 +6164,7 @@ app.get('/', (c) => {
         const el = document.getElementById(id);
         if (el) el.value = fields[id];
       }
+      if (draft.actionType === 'fetch_api') updateFetchResponseFields();
       if (pendingMedia && pendingMedia.targetId) {
         const el = document.getElementById(pendingMedia.targetId);
         if (el) el.value = pendingMedia.url || '';
@@ -6370,7 +6407,10 @@ app.get('/', (c) => {
           case 'send_document': return '📄 ' + (params.document_url || params.file_id || 'no file') + ' · ' + (params.document_caption || '');
           case 'show_keyboard': return (params.buttons||[]).length + ' buttons · ' + (params.keyboard_type||'reply');
           case 'store_data': return 'Key: ' + (params.key||'') + ' → Value: ' + (params.value||'message text');
-          case 'fetch_api': return params.method + ' ' + (params.api_url||'').slice(0,40);
+          case 'fetch_api': {
+            const mode = params.response_mode || 'raw';
+            return (params.method || 'GET') + ' ' + (params.api_url||'').slice(0,36) + (mode === 'template' ? ' · template' : ' · raw JSON');
+          }
           case 'forward': return 'To admin: ' + (params.admin_id||'not set');
           case 'set_state': return 'State → ' + (params.state || '') + (params.text ? ' · ask: "' + String(params.text).slice(0,40) + '"' : '');
           case 'clear_state': return 'Clear conversation state' + (params.text ? ' · "' + String(params.text).slice(0,40) + '"' : '');
@@ -6506,6 +6546,11 @@ app.get('/', (c) => {
       if (methodEl && params.method) methodEl.value = params.method;
       const bodyEl = document.getElementById('actionApiBody');
       if (bodyEl && params.body) bodyEl.value = params.body;
+      const modeEl = document.getElementById('actionApiResponseMode');
+      if (modeEl && params.response_mode) modeEl.value = params.response_mode;
+      const tplEl = document.getElementById('actionApiResponseTemplate');
+      if (tplEl && params.response_template) tplEl.value = params.response_template;
+      if (document.getElementById('actionApiResponseMode')) updateFetchResponseFields();
       const adminEl = document.getElementById('actionAdminId');
       if (adminEl && params.admin_id) adminEl.value = params.admin_id;
       const photoUrlEl = document.getElementById('actionPhotoUrl');
@@ -6581,6 +6626,20 @@ app.get('/', (c) => {
           <div class="form-group"><label>API URL</label><input class="form-input" id="actionApiUrl" placeholder="https://api.example.com/data"></div>
           <div class="form-group"><label>Method</label><select class="form-input" id="actionApiMethod"><option value="GET">GET</option><option value="POST">POST</option></select></div>
           <div class="form-group"><label>Body (JSON, for POST)</label><textarea class="form-input" id="actionApiBody" rows="3" placeholder='{"key":"value"}'></textarea></div>
+          <div class="form-group"><label>Reply Format</label>
+            <select class="form-input" id="actionApiResponseMode" onchange="updateFetchResponseFields()">
+              <option value="raw">Raw JSON</option>
+              <option value="template">Custom template</option>
+            </select>
+          </div>
+          <div class="form-group" id="actionApiTemplateGroup" style="display:none">
+            <label>Response Template</label>
+            <textarea class="form-input" id="actionApiResponseTemplate" rows="4" placeholder="{setup}&#10;&#10;{punchline}"></textarea>
+            <div style="font-size:0.75rem;color:var(--text-muted);margin-top:4px">
+              Use JSON keys as <code>{setup}</code> <code>{punchline}</code> · nested <code>{user.name}</code> · full JSON <code>{json}</code><br>
+              Also: <code>{first_name}</code> <code>{username}</code> <code>{message}</code>
+            </div>
+          </div>
         \`,
         forward: \`
           <div class="form-group"><label>Admin User ID</label><input class="form-input" id="actionAdminId" placeholder="Telegram user ID"></div>
@@ -6621,6 +6680,13 @@ app.get('/', (c) => {
         \`,
       };
       container.innerHTML = fields[type] || '<p style="color:var(--text-muted)">No additional parameters needed.</p>';
+      if (type === 'fetch_api') updateFetchResponseFields();
+    }
+
+    function updateFetchResponseFields() {
+      const mode = document.getElementById('actionApiResponseMode')?.value || 'raw';
+      const group = document.getElementById('actionApiTemplateGroup');
+      if (group) group.style.display = mode === 'template' ? 'block' : 'none';
     }
 
     async function saveRule() {
@@ -6650,7 +6716,27 @@ app.get('/', (c) => {
         case 'send_message': actionParams = { text: document.getElementById('actionText')?.value||'' }; break;
         case 'show_keyboard': actionParams = { text: document.getElementById('actionText')?.value||'Choose:', buttons: (document.getElementById('actionButtons')?.value||'').split('\\n').filter(b=>b.trim()), keyboard_type: document.getElementById('actionKeyboardType')?.value||'reply' }; break;
         case 'store_data': actionParams = { key: document.getElementById('actionDataKey')?.value||'', value: document.getElementById('actionDataValue')?.value||'' }; break;
-        case 'fetch_api': actionParams = { api_url: document.getElementById('actionApiUrl')?.value||'', method: document.getElementById('actionApiMethod')?.value||'GET', body: document.getElementById('actionApiBody')?.value||'{}' }; break;
+        case 'fetch_api': {
+          let apiUrl = (document.getElementById('actionApiUrl')?.value || '').trim().replace(/\\\\/g, '/');
+          if (apiUrl && !/^https?:\\/\\//i.test(apiUrl)) {
+            toast('API URL must start with https://', 'error');
+            return;
+          }
+          const responseMode = document.getElementById('actionApiResponseMode')?.value || 'raw';
+          const responseTemplate = document.getElementById('actionApiResponseTemplate')?.value || '';
+          if (responseMode === 'template' && !responseTemplate.trim()) {
+            toast('Add a response template, or switch Reply Format to Raw JSON', 'error');
+            return;
+          }
+          actionParams = {
+            api_url: apiUrl,
+            method: document.getElementById('actionApiMethod')?.value || 'GET',
+            body: document.getElementById('actionApiBody')?.value || '{}',
+            response_mode: responseMode,
+            response_template: responseTemplate,
+          };
+          break;
+        }
         case 'forward': actionParams = { admin_id: parseInt(document.getElementById('actionAdminId')?.value)||0 }; break;
         case 'send_photo': actionParams = { photo_url: document.getElementById('actionPhotoUrl')?.value||'', caption: document.getElementById('actionCaption')?.value||'' }; break;
         case 'send_document': actionParams = { document_url: document.getElementById('actionDocUrl')?.value||'', document_caption: document.getElementById('actionDocCaption')?.value||'' }; break;
