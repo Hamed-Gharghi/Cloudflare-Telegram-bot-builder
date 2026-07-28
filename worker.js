@@ -4836,9 +4836,25 @@ app.get('/', (c) => {
       window.open('https://dash.cloudflare.com/profile/api-tokens', '_blank', 'noopener,noreferrer');
     }
 
+    function markSetupTokenLinkClicked() {
+      try { sessionStorage.setItem('setupTokenLinkClicked', '1'); } catch (_) {}
+      const nextBtn = document.getElementById('setupStep1NextBtn');
+      const hint = document.getElementById('setupStep1Hint');
+      if (nextBtn) {
+        nextBtn.disabled = false;
+        nextBtn.title = '';
+      }
+      if (hint) {
+        hint.textContent = '✓ Token page opened. Create your token, then continue to paste it.';
+        hint.style.color = 'var(--success)';
+      }
+    }
+
     function showSetupStep(step) {
       const content = document.getElementById('setupContent');
       if (step === 1) {
+        let tokenLinkClicked = false;
+        try { tokenLinkClicked = sessionStorage.getItem('setupTokenLinkClicked') === '1'; } catch (_) {}
         content.innerHTML = \`
           <div class="step-indicator">
             <div class="step active">1</div>
@@ -4851,7 +4867,7 @@ app.get('/', (c) => {
           <p style="color:var(--text-muted);margin-bottom:16px;font-size:0.9rem">
             Use a custom token with the permissions below so this app can create and manage your D1, KV, R2, and Workers resources.
           </p>
-          <a class="api-token-link" href="https://dash.cloudflare.com/profile/api-tokens?name=Telegram%20Bot%20Builder&accountId=*&zoneId=all&permissionGroupKeys=%5B%7B%22key%22%3A%22d1%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_kv_storage%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_r2%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%5D" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:8px;width:100%;justify-content:center;padding:10px 16px;border-radius:8px;background:rgba(99,102,241,0.12);border:1px solid rgba(99,102,241,0.25);color:var(--primary);font-weight:600;margin-bottom:12px">
+          <a class="api-token-link" id="setupApiTokenLink" href="https://dash.cloudflare.com/profile/api-tokens?name=Telegram%20Bot%20Builder&accountId=*&zoneId=all&permissionGroupKeys=%5B%7B%22key%22%3A%22d1%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_kv_storage%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_r2%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%5D" target="_blank" rel="noopener" onclick="markSetupTokenLinkClicked()" style="display:inline-flex;align-items:center;gap:8px;width:100%;justify-content:center;padding:10px 16px;border-radius:8px;background:rgba(99,102,241,0.12);border:1px solid rgba(99,102,241,0.25);color:var(--primary);font-weight:600;margin-bottom:12px">
             🔑 Click here to create API Token with 1-Click →
           </a>
           <div style="color:var(--text-muted);font-size:0.85rem;margin-bottom:16px;padding:12px;background:var(--bg);border-radius:8px;line-height:1.7">
@@ -4868,8 +4884,17 @@ app.get('/', (c) => {
           <div style="padding:12px;background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.2);border-radius:8px;margin-bottom:16px;font-size:0.85rem;color:var(--text-muted)">
             After Cloudflare shows your new token, paste it in the field on the next step and continue.
           </div>
-          <button class="btn btn-primary" onclick="showSetupStep(2)">I created the token →</button>
+          <p id="setupStep1Hint" style="font-size:0.82rem;color:var(--warning);margin-bottom:10px">
+            \${tokenLinkClicked
+              ? '✓ Token page opened. Create your token, then continue to paste it.'
+              : 'Click the API Token button above first — then you can continue.'}
+          </p>
+          <button class="btn btn-primary" id="setupStep1NextBtn" style="width:100%" onclick="showSetupStep(2)" \${tokenLinkClicked ? '' : 'disabled'} title="\${tokenLinkClicked ? '' : 'Open the API Token page first'}">
+            I created the token →
+          </button>
         \`;
+        const hint = document.getElementById('setupStep1Hint');
+        if (hint && tokenLinkClicked) hint.style.color = 'var(--success)';
       } else if (step === 2) {
         content.innerHTML = \`
           <div class="step-indicator">
