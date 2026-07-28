@@ -640,13 +640,21 @@ class CFClient {
   }
 
   async enableWorkerSubdomain(scriptName) {
-    await this._fetch(
-      `/accounts/${this.accountId}/workers/scripts/${encodeURIComponent(scriptName)}/subdomain`,
-      {
-        method: 'POST',
-        body: JSON.stringify({ enabled: true }),
+    const path = `/accounts/${this.accountId}/workers/scripts/${encodeURIComponent(scriptName)}/subdomain`;
+    let lastErr = null;
+    // Cloudflare has used both POST and PUT for this endpoint over time.
+    for (const method of ['POST', 'PUT']) {
+      try {
+        await this._fetch(path, {
+          method,
+          body: JSON.stringify({ enabled: true }),
+        });
+        return true;
+      } catch (e) {
+        lastErr = e;
       }
-    );
+    }
+    throw new Error('Failed to enable workers.dev subdomain: ' + (lastErr?.message || 'unknown error'));
   }
 
   async deployWorker(scriptName, code, { envVars = {}, kvId = null, workersSubdomain = null } = {}) {
@@ -718,15 +726,9 @@ class CFClient {
       ? Promise.resolve(workersSubdomain)
       : this.getWorkersSubdomain().catch(() => null);
 
-    // Ensure workers.dev route is enabled (uses PUT which works on all accounts)
-    try {
-      await this._fetch(
-        `/accounts/${this.accountId}/workers/scripts/${encodeURIComponent(safeName)}/subdomain`,
-        { method: 'PUT', body: JSON.stringify({ enabled: true }) }
-      );
-    } catch {
-      // Subdomain may already be enabled — continue
-    }
+    // Ensure workers.dev route is enabled; do not swallow failures, because
+    // webhook URLs rely on this and silent failure leads to 404 webhooks.
+    await this.enableWorkerSubdomain(safeName);
 
     let subdomain = await subdomainPromise;
     if (!subdomain) {
@@ -737,23 +739,10 @@ class CFClient {
 
     const botToken = envVars.BOT_TOKEN;
 
-    // Fire health check with 3s timeout (non-blocking — won't delay response)
-    const healthPromise = (async () => {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 3000);
-        const probe = await fetch(`${workerUrl}/health`, { signal: controller.signal });
-        clearTimeout(timeout);
-        if (probe.ok) {
-          const health = await probe.json();
-          if (!health.hasToken) {
-            console.warn('Bot deployed but BOT_TOKEN binding appears missing — check env vars');
-          }
-        }
-      } catch {
-        // Worker may still be propagating — safe to ignore
-      }
-    })();
+    // Keep deploy invocation lightweight to avoid Workers subrequest limits.
+    // Readiness can be briefly eventual after deploy; webhook setup below is
+    // the primary success criteria here.
+    const readinessWarning = null;
 
     // Deploy webhook (critical — must succeed before returning)
     let webhook = null;
@@ -783,7 +772,7 @@ class CFClient {
         .catch(() => {});
     }
 
-    return { ...data, scriptName: safeName, workerUrl, webhook };
+    return { ...data, scriptName: safeName, workerUrl, webhook, readinessWarning };
   }
 
   // ── Ensure bot_logs table exists (for existing databases where migration already ran) ──
@@ -3389,11 +3378,6 @@ app.post('/api/bots/:id/deploy', authMiddleware, async (c) => {
     const scriptName = `tb-${(bot.bot_username || String(botId)).toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')}`;
     const code = generateBotScript(botRules);
 
-    const host = new URL(c.req.url || c.request.url).hostname;
-    const workersSubdomain = host.endsWith('.workers.dev')
-      ? host.split('.').slice(1, -2).join('.') || host.split('.')[1]
-      : null;
-
     const host2 = new URL(c.req.url || c.request.url);
     const parentUrl = host2.origin;
 
@@ -3413,7 +3397,6 @@ app.post('/api/bots/:id/deploy', authMiddleware, async (c) => {
         LOG_ENABLED: 'true',
       },
       kvId: cf.kvId,
-      workersSubdomain,
     });
 
     const workerUrl = result.workerUrl;
@@ -3422,12 +3405,14 @@ app.post('/api/bots/:id/deploy', authMiddleware, async (c) => {
       [workerUrl, result.scriptName || scriptName, botId]
     );
 
+    const warning = result.readinessWarning ? ` ⚠️ ${result.readinessWarning}` : '';
     return c.json({
-      message: `✅ Bot deployed! @${bot.bot_username} is live.`,
+      message: `✅ Bot deployed! @${bot.bot_username} is live.${warning}`,
       workerUrl,
       scriptName: result.scriptName || scriptName,
       webhookUrl: `${workerUrl}/webhook`,
       webhook: result.webhook?.result || null,
+      readinessWarning: result.readinessWarning || null,
     });
   } catch (e) {
     return c.json({ error: 'Deployment failed: ' + e.message }, 500);
@@ -3574,33 +3559,45 @@ app.get('/', (c) => {
     :root {
       --primary: #6366f1;
       --primary-hover: #4f46e5;
-      --primary-light: rgba(99, 102, 241, 0.12);
-      --primary-glow: rgba(99, 102, 241, 0.3);
+      --primary-light: rgba(99, 102, 241, 0.14);
+      --primary-glow: rgba(99, 102, 241, 0.34);
       --danger: #ef4444;
       --success: #22c55e;
       --warning: #f59e0b;
-      --bg: #0b1120;
-      --bg-card: #131c31;
-      --bg-elevated: #182340;
-      --bg-input: #1e293b;
+      --bg: #070d1a;
+      --bg-soft: #0b1324;
+      --bg-card: #121b2f;
+      --bg-elevated: #182544;
+      --bg-input: #1c2a44;
       --border: #273552;
-      --border-light: #34456b;
-      --text: #f1f5f9;
-      --text-muted: #8899bb;
-      --text-dim: #556688;
+      --border-light: #3a4f77;
+      --text: #f8fafc;
+      --text-muted: #93a5c7;
+      --text-dim: #6b7ea4;
       --radius: 14px;
-      --radius-sm: 8px;
+      --radius-sm: 10px;
       --radius-xl: 20px;
-      --shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
-      --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.55);
-      --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.3);
+      --space-1: 4px;
+      --space-2: 8px;
+      --space-3: 12px;
+      --space-4: 16px;
+      --space-5: 20px;
+      --space-6: 24px;
+      --space-7: 32px;
+      --space-8: 40px;
+      --shadow: 0 10px 32px rgba(2, 8, 23, 0.45);
+      --shadow-lg: 0 20px 56px rgba(2, 8, 23, 0.58);
+      --shadow-sm: 0 3px 12px rgba(2, 8, 23, 0.32);
     }
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-      background: var(--bg);
+      background:
+        radial-gradient(900px 420px at 0% -10%, rgba(99, 102, 241, 0.16), transparent 55%),
+        radial-gradient(760px 360px at 110% 10%, rgba(16, 185, 129, 0.08), transparent 58%),
+        linear-gradient(180deg, var(--bg-soft) 0%, var(--bg) 100%);
       color: var(--text);
       min-height: 100vh;
       min-height: 100dvh;
@@ -3619,9 +3616,9 @@ app.get('/', (c) => {
     ::-webkit-scrollbar-thumb:hover { background: var(--border-light); }
 
     .container {
-      max-width: 1200px;
+      max-width: 1280px;
       margin: 0 auto;
-      padding: 0 24px;
+      padding: 0 var(--space-6);
     }
 
     /* ─── Header ─── */
@@ -3634,9 +3631,12 @@ app.get('/', (c) => {
       z-index: 100;
       backdrop-filter: blur(8px);
       -webkit-backdrop-filter: blur(8px);
-      transition: box-shadow 0.3s ease;
+      transition: box-shadow 0.3s ease, border-color 0.3s ease;
     }
-    header.scrolled { box-shadow: 0 4px 24px rgba(0, 0, 0, 0.2); }
+    header.scrolled {
+      box-shadow: 0 8px 28px rgba(2, 8, 23, 0.28);
+      border-bottom-color: rgba(58, 79, 119, 0.6);
+    }
     header .container { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 
     .logo {
@@ -3695,8 +3695,12 @@ app.get('/', (c) => {
       font-size: 0.9rem;
       font-weight: 600;
       cursor: pointer;
-      transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+      transition: transform 0.16s ease, box-shadow 0.16s ease, background 0.16s ease, border-color 0.16s ease, filter 0.16s ease;
       text-decoration: none;
+    }
+    .btn:focus-visible {
+      outline: none;
+      box-shadow: 0 0 0 3px var(--primary-light);
     }
     .btn:active { transform: scale(0.96); }
     .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
@@ -3718,7 +3722,7 @@ app.get('/', (c) => {
       border: 1px solid var(--border);
     }
     .btn-ghost:hover:not(:disabled) {
-      background: var(--bg-input);
+      background: rgba(28, 42, 68, 0.65);
       border-color: var(--border-light);
       transform: translateY(-1px);
     }
@@ -3737,9 +3741,14 @@ app.get('/', (c) => {
       border-radius: var(--radius-sm);
       color: var(--text);
       font-size: 0.95rem;
-      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+      transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
     }
-    .form-input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-light); }
+    .form-input:focus {
+      outline: none;
+      border-color: var(--primary);
+      background: rgba(28, 42, 68, 0.85);
+      box-shadow: 0 0 0 3px var(--primary-light);
+    }
     .form-input:hover:not(:focus) { border-color: var(--border-light); }
     .form-input::placeholder { color: var(--text-dim); }
     textarea.form-input { resize: vertical; min-height: 80px; font-family: inherit; }
@@ -3757,6 +3766,7 @@ app.get('/', (c) => {
       border: 1px solid var(--border);
       border-radius: var(--radius);
       padding: 24px;
+      box-shadow: var(--shadow-sm);
       transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
     }
     .card:hover { transform: translateY(-2px); border-color: var(--border-light); box-shadow: var(--shadow); }
@@ -3977,7 +3987,7 @@ app.get('/', (c) => {
     }
 
     /* ─── Dashboard ─── */
-    .dashboard { display: none; padding: 32px 0 0; animation: fadeIn 0.3s ease; }
+    .dashboard { display: none; padding: 36px 0 0; animation: fadeIn 0.3s ease; }
 
     .footer {
       margin-top: 48px;
@@ -4033,18 +4043,30 @@ app.get('/', (c) => {
       margin-bottom: 32px;
       flex-wrap: wrap;
       gap: 16px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid rgba(58, 79, 119, 0.35);
     }
-    .page-header h1 { font-size: 1.8rem; font-weight: 800; letter-spacing: -0.5px; }
+    .page-header h1 {
+      font-size: 1.8rem;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      line-height: 1.2;
+    }
 
     .bot-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-      gap: 20px;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 22px;
     }
     .bot-card {
       position: relative;
       overflow: hidden;
-      cursor: pointer;
+      cursor: default;
+      padding: 22px;
+      border: 1px solid var(--border);
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)),
+        var(--bg-card);
     }
     .bot-card::before {
       content: '';
@@ -4064,18 +4086,34 @@ app.get('/', (c) => {
       border-radius: 50%;
       z-index: 1;
     }
-    .bot-card .bot-status.active { background: var(--success); box-shadow: 0 0 8px rgba(34,197,94,0.5); }
+    .bot-card .bot-status.active { background: var(--success); box-shadow: 0 0 10px rgba(34,197,94,0.45); }
     .bot-card .bot-status.inactive { background: var(--text-dim); }
-    .bot-card h3 { font-size: 1.1rem; margin-bottom: 4px; position: relative; z-index: 1; }
-    .bot-card .bot-username { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 12px; position: relative; z-index: 1; }
+    .bot-card h3 { font-size: 1.13rem; margin-bottom: 4px; position: relative; z-index: 1; letter-spacing: -0.2px; }
+    .bot-card .bot-username { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 14px; position: relative; z-index: 1; }
     .bot-card .bot-meta {
       display: flex;
-      gap: 12px;
+      gap: 8px;
+      flex-wrap: wrap;
       font-size: 0.8rem;
       color: var(--text-muted);
       margin-bottom: 16px;
       position: relative;
       z-index: 1;
+    }
+    .bot-card .meta-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(58, 79, 119, 0.55);
+      background: rgba(28, 42, 68, 0.45);
+      color: var(--text-muted);
+    }
+    .bot-card .bot-divider {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(58,79,119,0.45), transparent);
+      margin: 12px 0 14px;
     }
     .bot-card .bot-actions {
       display: flex;
@@ -4084,6 +4122,19 @@ app.get('/', (c) => {
       align-items: center;
       position: relative;
       z-index: 1;
+    }
+    .bot-card .bot-actions .btn-sm { padding: 6px 11px; }
+    .bot-card .bot-actions .action-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      flex-wrap: wrap;
+    }
+    .bot-card .bot-actions .action-row-secondary {
+      opacity: 0.95;
+      padding-top: 6px;
+      border-top: 1px dashed rgba(58,79,119,0.36);
     }
 
     /* ─── Toggle Switch ─── */
@@ -4132,7 +4183,7 @@ app.get('/', (c) => {
     .toggle:hover .slider { box-shadow: 0 0 0 3px var(--primary-light); }
     .toggle input:disabled + .slider { opacity: 0.5; cursor: not-allowed; }
 
-    .builder-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+    .builder-layout { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr); gap: 24px; align-items: start; }
 
     /* ─── Rule Cards ─── */
     .rule-card {
@@ -4145,7 +4196,7 @@ app.get('/', (c) => {
       display: flex;
       overflow: hidden;
     }
-    .rule-card:hover { border-color: var(--primary); box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
+    .rule-card:hover { border-color: var(--primary); box-shadow: 0 10px 26px rgba(2,8,23,0.35); }
     .rule-card.dragging { opacity: 0.3; transform: scale(0.95) rotate(-1deg); }
     .rule-card.drag-over { border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary-light); transform: translateY(3px); }
     .rule-card.broken-media {
@@ -4183,6 +4234,10 @@ app.get('/', (c) => {
       transition: background 0.15s ease; font-weight: 600; font-size: 1rem;
     }
     .guide-header:hover { background: var(--bg-input); }
+    .guide-header.open {
+      background: rgba(28, 42, 68, 0.5);
+      border-bottom: 1px solid rgba(58,79,119,0.45);
+    }
     .guide-header .guide-icon {
       width: 36px; height: 36px; border-radius: 50%;
       display: flex; align-items: center; justify-content: center;
@@ -4234,6 +4289,15 @@ app.get('/', (c) => {
     .rule-card .rule-actions {
       display: flex; gap: 2px; align-items: center; flex-shrink: 0;
     }
+    .rule-card .rule-preview {
+      font-size: 0.83rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+      padding: 8px 10px;
+      border: 1px solid rgba(58,79,119,0.45);
+      border-radius: 10px;
+      background: rgba(28, 42, 68, 0.35);
+    }
     .rule-card .rule-trigger {
       display: inline-flex; align-items: center; gap: 6px;
       background: var(--primary-light); color: #a5b4fc;
@@ -4245,10 +4309,43 @@ app.get('/', (c) => {
       padding: 4px 12px; border-radius: 20px; font-size: 0.8rem; font-weight: 600;
     }
 
-    .empty-state { text-align: center; padding: 60px 20px; color: var(--text-muted); }
+    .empty-state {
+      text-align: center;
+      padding: 60px 20px;
+      color: var(--text-muted);
+      border: 1px dashed rgba(58,79,119,0.55);
+      border-radius: var(--radius);
+      background: rgba(18,27,47,0.55);
+    }
     .empty-state .icon { font-size: 3rem; margin-bottom: 16px; }
     .empty-state h3 { font-size: 1.3rem; margin-bottom: 8px; color: var(--text); }
     .empty-state p { max-width: 400px; margin: 0 auto 24px; }
+    .stats-strip {
+      color: var(--text-muted);
+      font-size: 0.84rem;
+      margin-bottom: 16px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .stats-strip > span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(58,79,119,0.5);
+      background: rgba(28, 42, 68, 0.38);
+    }
+    .section-kicker {
+      color: var(--text-muted);
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.9px;
+      font-weight: 700;
+      margin-bottom: 6px;
+      opacity: 0.9;
+    }
 
     /* ─── Modal ─── */
     .modal-overlay {
@@ -4266,7 +4363,13 @@ app.get('/', (c) => {
       box-shadow: var(--shadow-lg); animation: modalIn 0.25s cubic-bezier(0.4, 0, 0.2, 1);
     }
     @keyframes modalIn { from { transform: scale(0.92) translateY(10px); opacity: 0; } to { transform: scale(1) translateY(0); opacity: 1; } }
-    .modal h2 { font-size: 1.4rem; margin-bottom: 20px; }
+    .modal h2 { font-size: 1.4rem; margin-bottom: 14px; letter-spacing: -0.3px; }
+    .modal p { color: var(--text-muted); line-height: 1.6; }
+    .modal .form-group { margin-bottom: 14px; }
+    .modal .form-group + .form-group {
+      padding-top: 10px;
+      border-top: 1px dashed rgba(58,79,119,0.36);
+    }
     .modal-close { float: right; background: none; border: none; color: var(--text-muted); font-size: 1.4rem; cursor: pointer; transition: color 0.15s ease; }
     .modal-close:hover { color: var(--text); }
 
@@ -4363,7 +4466,9 @@ app.get('/', (c) => {
       border-bottom: 1px solid var(--border);
       font-size: 0.85rem;
       align-items: flex-start;
+      transition: background 0.15s ease;
     }
+    .log-row:hover { background: rgba(28, 42, 68, 0.32); }
     .log-row:last-child { border-bottom: none; }
     .log-time {
       flex-shrink: 0;
@@ -4385,10 +4490,47 @@ app.get('/', (c) => {
       line-height: 1.45;
       white-space: pre-wrap;
     }
+    .subscribers-list {
+      max-height: 420px;
+      overflow: auto;
+      font-size: 0.85rem;
+      border: 1px solid rgba(58,79,119,0.45);
+      border-radius: 10px;
+      background: rgba(28,42,68,0.26);
+    }
+    .subscriber-row {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+      transition: background 0.15s ease;
+    }
+    .subscriber-row:hover { background: rgba(28,42,68,0.4); }
+    .subscriber-row:last-child { border-bottom: none; }
+    .subscriber-id {
+      color: var(--text-muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.75rem;
+    }
+    .broadcast-layout {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 20px;
+      align-items: start;
+    }
+    .broadcast-panel {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+    }
 
     /* ─── Responsive: Tablet & Below ─── */
     @media (max-width: 768px) {
       .builder-layout { grid-template-columns: 1fr; }
+      .broadcast-layout { grid-template-columns: 1fr; }
       .container { padding: 0 16px; }
       header { padding: 10px 0; }
       .logo { font-size: 1.15rem; }
@@ -4413,6 +4555,7 @@ app.get('/', (c) => {
       .version-badge { margin-left: 0; }
       .setup-card { padding: 28px 20px; }
       .bot-card .bot-actions { justify-content: center; }
+      .bot-card .bot-actions .action-row { justify-content: center; }
       .toast-container { left: 16px; right: 16px; bottom: 16px; }
       .toast { font-size: 0.85rem; padding: 10px 16px; }
       .btn { padding: 10px 18px; font-size: 0.85rem; }
@@ -5168,7 +5311,7 @@ app.get('/', (c) => {
               <button class="btn btn-primary" onclick="showCreateBotModal()">+ New Bot</button>
             </div>
           </div>
-          <div id="dbStats" style="color:var(--text-muted);font-size:0.85rem;margin-bottom:16px;display:flex;gap:16px;flex-wrap:wrap">
+          <div id="dbStats" class="stats-strip">
             <span>💾 Loading DB stats...</span>
           </div>
           \${state.bots.length === 0 ? \`
@@ -5186,20 +5329,26 @@ app.get('/', (c) => {
                   <h3>\${bot.bot_name}</h3>
                   <div class="bot-username">@\${bot.bot_username || 'unknown'}</div>
                   <div class="bot-meta">
-                    <span>📅 \${new Date(bot.created_at).toLocaleDateString()}</span>
-                    <span>🆔 #\${bot.id}</span>
+                    <span class="meta-chip">📅 \${new Date(bot.created_at).toLocaleDateString()}</span>
+                    <span class="meta-chip">🆔 #\${bot.id}</span>
+                    <span class="meta-chip">\${bot.is_active ? '🟢 Active' : '⏸️ Paused'}</span>
                   </div>
+                  <div class="bot-divider"></div>
                   <div class="bot-actions">
-                    <button class="btn btn-primary btn-sm" onclick="showBotBuilder(\${bot.id}, event)">Configure</button>
-                    <button class="btn btn-success btn-sm" data-bot-id="\${bot.id}" onclick="deployBot(\${bot.id})">Deploy</button>
-                    <label class="toggle \${bot.is_active ? 'active' : 'inactive'}" title="\${bot.is_active ? 'Click to pause bot' : 'Click to activate bot'}">
-                      <input type="checkbox" \${bot.is_active ? 'checked' : ''} onchange="toggleBot(\${bot.id}, this)">
-                      <span class="slider"></span>
-                      <span class="toggle-label">\${bot.is_active ? 'ON' : 'OFF'}</span>
-                    </label>
-                    <button class="btn btn-ghost btn-sm" onclick="showLogs(\${bot.id}, event)" title="View bot logs">📋 Logs</button>
-                    <button class="btn btn-ghost btn-sm" onclick="showEditBotModal(\${bot.id})" title="Change bot token">🔑 Edit Token</button>
-                    <button class="btn btn-danger btn-sm" onclick="deleteBot(\${bot.id})">Delete</button>
+                    <div class="action-row">
+                      <button class="btn btn-primary btn-sm" onclick="showBotBuilder(\${bot.id}, event)">Configure</button>
+                      <button class="btn btn-success btn-sm" data-bot-id="\${bot.id}" onclick="deployBot(\${bot.id})">Deploy</button>
+                      <label class="toggle \${bot.is_active ? 'active' : 'inactive'}" title="\${bot.is_active ? 'Click to pause bot' : 'Click to activate bot'}">
+                        <input type="checkbox" \${bot.is_active ? 'checked' : ''} onchange="toggleBot(\${bot.id}, this)">
+                        <span class="slider"></span>
+                        <span class="toggle-label">\${bot.is_active ? 'ON' : 'OFF'}</span>
+                      </label>
+                    </div>
+                    <div class="action-row action-row-secondary">
+                      <button class="btn btn-ghost btn-sm" onclick="showLogs(\${bot.id}, event)" title="View bot logs">📋 Logs</button>
+                      <button class="btn btn-ghost btn-sm" onclick="showEditBotModal(\${bot.id})" title="Change bot token">🔑 Edit Token</button>
+                      <button class="btn btn-danger btn-sm" onclick="deleteBot(\${bot.id})">Delete</button>
+                    </div>
                   </div>
                 </div>
               \`).join('')}
@@ -5292,7 +5441,7 @@ app.get('/', (c) => {
               '<ol>',
                 '<li>Click <strong>"+ New Bot"</strong> on the dashboard</li>',
                 '<li>Paste your bot token into the input field</li>',
-                '<li>Click <strong>"Validate & Create"</strong></li>',
+                '<li>Click <strong>"Validate & Create Bot"</strong></li>',
                 '<li>The system will verify the token with Telegram and automatically fetch your bot\\'s name and username</li>',
               '</ol>',
               '<p>Your new bot will appear as a card on the dashboard. From there you can <strong>Configure</strong> it (add rules), <strong>Deploy</strong> it, or <strong>Delete</strong> it.</p>',
@@ -5477,7 +5626,7 @@ app.get('/', (c) => {
         <p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:16px">
           Get your bot token from <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a> on Telegram.
         </p>
-        <button class="btn btn-primary" style="width:100%" onclick="createBot(event)">Validate & Create</button>
+        <button class="btn btn-primary" style="width:100%" onclick="createBot(event)">Validate & Create Bot</button>
       \`;
       document.getElementById('modalOverlay').classList.add('show');
     }
@@ -5704,6 +5853,7 @@ app.get('/', (c) => {
           '<div class="page-header">' +
             '<div>' +
               '<button class="btn btn-ghost btn-sm" onclick="showBotBuilder(' + botId + ')" style="margin-bottom:8px">← Back to Builder</button>' +
+              '<div class="section-kicker">Monitoring</div>' +
               '<h1>📋 Logs: ' + botTitle + '</h1>' +
               '<p style="color:var(--text-muted);font-size:0.85rem">' +
                 totalCount + ' total entries · ' + escapeHtml(levelSummary) + escapeHtml(sourceLabel) +
@@ -6076,6 +6226,7 @@ app.get('/', (c) => {
         </div>
         <div class="builder-layout">
           <div>
+            <div class="section-kicker">Automation Rules</div>
             <h3 style="margin-bottom:16px">📋 Rules</h3>
             \${rules.length === 0 ? \`
               <div class="empty-state" style="padding:40px 20px">
@@ -6118,12 +6269,13 @@ app.get('/', (c) => {
                         '</div>';
                     } catch(e) { return ''; }
                   })()}
-                  <div style="font-size:0.85rem;color:var(--text-muted)">\${renderRulePreview(rule)}</div>
+                  <div class="rule-preview">\${renderRulePreview(rule)}</div>
                 </div>
               </div>
             \`).join('')}
           </div>
           <div>
+            <div class="section-kicker">Runtime Preview</div>
             <h3 style="margin-bottom:16px">📄 Generated Code</h3>
             <div class="code-preview" id="codePreview">Loading...</div>
             <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="copyCode()">📋 Copy Code</button>
@@ -6583,6 +6735,7 @@ app.get('/', (c) => {
           <div class="page-header">
             <div>
               <button class="btn btn-ghost btn-sm" onclick="showBotBuilder(\${botId})" style="margin-bottom:8px">← Back to Builder</button>
+              <div class="section-kicker">Audience Messaging</div>
               <h1>📢 Broadcast</h1>
               <p style="color:var(--text-muted);font-size:0.85rem">
                 Send a newsletter to everyone who has messaged this bot · <strong>\${total}</strong> subscriber\${total !== 1 ? 's' : ''}
@@ -6592,8 +6745,8 @@ app.get('/', (c) => {
             <button class="btn btn-ghost btn-sm" onclick="showBroadcast(\${botId}, event)">🔄 Refresh</button>
           </div>
 
-          <div style="display:grid;grid-template-columns:1.2fr 0.8fr;gap:20px;align-items:start">
-            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:20px">
+          <div class="broadcast-layout">
+            <div class="broadcast-panel">
               <div class="form-group">
                 <label>Message</label>
                 <textarea class="form-input" id="broadcastText" rows="6" placeholder="Hello {first_name}! Here's what's new..."></textarea>
@@ -6613,7 +6766,7 @@ app.get('/', (c) => {
               </button>
             </div>
 
-            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:20px">
+            <div class="broadcast-panel">
               <h3 style="margin-bottom:12px">Recent subscribers</h3>
               \${users.length === 0 ? \`
                 <div class="empty-state" style="padding:24px">
@@ -6628,14 +6781,14 @@ app.get('/', (c) => {
                   <p style="margin-top:12px;font-size:0.8rem;color:var(--text-muted)">If Logs show activity but users stay at 0, Redeploy parent + bot, message again, then Refresh. Subscribers are recovered from log history when possible.</p>
                 </div>
               \` : \`
-                <div style="max-height:420px;overflow:auto;font-size:0.85rem">
+                <div class="subscribers-list">
                   \${users.map(u => \`
-                    <div style="padding:8px 0;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;gap:8px">
+                    <div class="subscriber-row">
                       <span>
                         <strong>\${escapeHtml(u.first_name || u.username || 'User')}</strong>
                         \${u.username ? '<span style="color:var(--text-muted)"> @' + escapeHtml(u.username) + '</span>' : ''}
                       </span>
-                      <span style="color:var(--text-muted);font-family:monospace;font-size:0.75rem">\${escapeHtml(String(u.telegram_user_id))}</span>
+                      <span class="subscriber-id">\${escapeHtml(String(u.telegram_user_id))}</span>
                     </div>
                   \`).join('')}
                 </div>
