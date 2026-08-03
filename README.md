@@ -1,7 +1,5 @@
 <div align="center">
-  <br/>
-  <h1>🤖 HG-TeleFlare</h1>
-  <h3><em>The Zero-Config, Self-Bootstrapping Telegram Bot Builder for Cloudflare Workers</em></h3>
+  <img src="cover.png" alt="HG-TeleFlare — Telegram Bot Builder for Cloudflare Workers" width="100%">
   <br/>
   <p align="center">
     <a href="#-features"><strong>✨ Features</strong></a> ·
