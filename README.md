@@ -6,7 +6,7 @@
   <br/>
   <p align="center">
     <a href="#-features"><strong>✨ Features</strong></a> ·
-    <a href="#-whats-new-in-v130"><strong>🆕 v1.3.0</strong></a> ·
+    <a href="#-whats-new-in-v140"><strong>🆕 v1.4.0</strong></a> ·
     <a href="#-quick-start-deploy-in-60-seconds"><strong>🚀 Quick Start</strong></a> ·
     <a href="#-full-deployment-guide-step-by-step"><strong>📖 Full Guide</strong></a> ·
     <a href="#-architecture"><strong>🏗️ Architecture</strong></a> ·
@@ -16,7 +16,7 @@
   <br/>
 
   [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-  [![Version](https://img.shields.io/badge/Version-1.3.0-success.svg)]()
+  [![Version](https://img.shields.io/badge/Version-1.4.0-success.svg)]()
   [![Powered by Cloudflare](https://img.shields.io/badge/Powered_by-Cloudflare_Workers-F6821F?logo=cloudflare)](https://workers.cloudflare.com/)
   [![JavaScript](https://img.shields.io/badge/JavaScript-ES2022-F7DF1E?logo=javascript&logoColor=black)]()
   [![Deploy](https://img.shields.io/badge/Deploy-Cloudflare-380D4F?logo=cloudflare)](https://dash.cloudflare.com/)
@@ -32,31 +32,23 @@
 
 ---
 
-## 🆕 What's New in v1.3.0
-
-Everything since **v1.0.0** ships in this release (no separate 1.1 / 1.2 tags).
+## 🆕 What's New in v1.4.0
 
 | Area | Improvement |
 |---|---|
-| **📤 Import / Export** | Download rules as JSON templates; import with append or replace |
-| **🎯 Match types** | Message/callback triggers: **Contains**, **Exact**, **Starts With**, **Regex** |
-| **🔁 Multi-step forms** | **On State** triggers + **Set / Clear State** actions (KV-backed) |
-| **📢 Broadcast** | Newsletter to subscribers — personalized (`{first_name}`, `{username}`, …), KV + live-Worker audience, subrequest-safe sending (~40/request on free plan) |
-| **📋 Logs** | KV-first history with aggregated storage so the dashboard shows full activity |
-| **👥 Subscribers** | Audience from live bot Worker + KV; Broadcast UI shows D1 / KV / Worker sources |
-| **📁 Media picker** | Choosing a library file no longer resets the rule editor |
-| **⏳ Loading UX** | Spinners / progress on Logs, Broadcast, Deploy, Save Rule, Sign In / Sign Up, and more |
-| **⌨️ Auth** | Enter key submits Sign In / Create Admin forms |
-| **📊 Dashboard stats** | Log counts include KV-backed logs (not D1-only zeros) |
+| **📋 Send Form Summary** | New action that collects stored form fields and sends a formatted summary to **admin**, **user**, or **both** |
+| **📥 Submissions inbox** | Dashboard tab to view, copy, and delete completed form results (KV + D1) |
+| **🌐 Fetch API templates** | Choose **Raw JSON** or a **custom template** with `{key}`, nested paths, and `{json}` |
+| **⚡ Subrequest-safe paths** | Lighter schema/migrations and submissions reads to stay within Workers free-plan limits |
 
-> **Upgrade tip:** After pasting `worker.js`, open the dashboard once, then click **🚀 Deploy** on each bot so child workers pick up the new broadcast/subscriber code.
+> **Upgrade tip:** Paste the new `worker.js` into the **parent** Worker and deploy it, hard-refresh the dashboard, then click **🚀 Deploy** on **each bot** so child workers get form-summary + submissions support.
 
 ---
 
 ## 📋 Table of Contents
 
 - [✨ Features](#-features)
-- [🆕 What's New in v1.3.0](#-whats-new-in-v130)
+- [🆕 What's New in v1.4.0](#-whats-new-in-v140)
 - [🔮 Coming Features (برنامه‌های آینده)](#-coming-features-برنامه‌های-آینده)
 - [🚀 Quick Start (Deploy in 60 Seconds)](#-quick-start-deploy-in-60-seconds)
 - [📖 Full Deployment Guide (Step-by-Step)](#-full-deployment-guide-step-by-step)
@@ -88,11 +80,14 @@ Everything since **v1.0.0** ships in this release (no separate 1.1 / 1.2 tags).
 | Feature | Description |
 |---|---|
 | **🤖 Zero-Config Self-Bootstrapping** | Paste a Cloudflare API token, and HG-TeleFlare automatically creates its own **D1 Database** & **KV Storage**, runs schema migrations, and saves the config — no CLI, no manual setup. |
-| **🎨 Visual Rule Builder** | Create bots using an intuitive drag-and-drop UI. Map **Triggers** (Commands, Messages, Callbacks, New Members, **On State**) to **Actions** (Send Message, Send Photo/Document, Keyboards, Fetch APIs, Store Data, Set/Clear State). |
+| **🎨 Visual Rule Builder** | Create bots using an intuitive drag-and-drop UI. Map **Triggers** (Commands, Messages, Callbacks, New Members, **On State**) to **Actions** (Send Message, Send Photo/Document, Keyboards, Fetch APIs, Store Data, Set/Clear State, **Send Form Summary**). |
 | **⚡ Dynamic Worker Generation** | Click **"Deploy"** and HG-TeleFlare translates your visual rules into optimized, pure-JavaScript code, provisions a child Cloudflare Worker, and sets up the Telegram webhook — **instantly**. |
 | **📁 Built-in Media Storage** | Upload images and documents in the dashboard (KV, up to 15MB). Pick files from the library when building Send Photo / Send Document rules. |
 | **🔤 Dynamic Variables** | Personalize replies **and broadcasts** with `{first_name}`, `{username}`, `{last_name}`, `{user_id}`, `{chat_id}`, `{message}`, `{date}`. |
 | **📊 Real-Time Log Viewer** | Monitor bot activity (D1 + KV), filter by level (DEBUG / INFO / WARNING / ERROR), and clear logs on demand. |
+| **📥 Form Submissions Inbox** | Browse completed multi-step form results in the dashboard — view, copy, or delete. |
+| **📋 Send Form Summary** | On the last form step, send a templated summary of stored keys to admin and/or the user, then optionally clear keys + state. |
+| **🌐 Fetch API Reply Formats** | Return **raw JSON** or a **custom template** using API fields like `{setup}` / `{punchline}`. |
 | **📦 Single-File Deployment** | The entire app — router, API client, dashboard UI, code generator — lives in one `worker.js`. No build step, no npm at runtime. |
 | **🔄 Rule Reordering** | Drag and drop to reorder rules. Priority is managed automatically. |
 | **📋 Rule Duplication** | Clone existing rules to speed up configuration. |
@@ -152,7 +147,7 @@ HG-TeleFlare requires **no** `npm install`, **no** Wrangler CLI, and **no** loca
 3. Register your **admin account** (first registration is the admin).
 4. 🎉 **Done!** Start building bots.
 
-> **v1.3 note:** This release is **paste-and-deploy only**. There is no `package.json`, Wrangler project, or local CLI workflow in this repository. Edit `worker.js` and redeploy from the Cloudflare dashboard. After upgrading, **redeploy each bot** from the UI so child workers match the parent.
+> **v1.4 note:** This release is **paste-and-deploy only**. There is no `package.json`, Wrangler project, or local CLI workflow in this repository. Edit `worker.js` and redeploy from the Cloudflare dashboard. After upgrading, **redeploy each bot** from the UI so child workers match the parent.
 
 ---
 
@@ -394,8 +389,9 @@ You're now inside the **HG-TeleFlare Dashboard**. Here's what to do next:
    - **Send Message:** Reply with text (use `{first_name}`, `{username}`, etc.)
    - **Send Photo / Document:** From your media library
    - **Show Keyboard:** Display custom buttons
-   - **Fetch API:** Call an external API and return the response
+   - **Fetch API:** Call an external API — raw JSON or a custom reply template
    - **Store Data:** Save data to KV storage
+   - **Send Form Summary:** Collect stored keys and notify admin / user
    - **Set / Clear State:** Drive multi-step conversations
 5. Click **"Save Rule"**.
 
@@ -408,11 +404,12 @@ You're now inside the **HG-TeleFlare Dashboard**. Here's what to do next:
    - Set up the Telegram webhook automatically.
 3. **Your bot is live!** 🎉 Test it by sending a message on Telegram.
 
-#### 10.5 — Monitor, Broadcast & Upgrade
+#### 10.5 — Monitor, Broadcast, Submissions & Upgrade
 
 1. Open the **"Logs"** tab for real-time activity (KV + D1).
 2. Use **Broadcast** to message subscribers (personalize with `{first_name}`, etc.).
-3. After upgrading `worker.js` on the parent Worker, **Deploy each bot again** so child Workers get the latest runtime.
+3. Open **Submissions** to review completed form results.
+4. After upgrading `worker.js` on the parent Worker, **Deploy each bot again** so child Workers get the latest runtime.
 
 ---
 
@@ -499,6 +496,15 @@ Authorization: Bearer <jwt-token>
 | `GET` | `/api/bots/:id/users` | List tracked Telegram users for a bot |
 | `POST` | `/api/bots/:id/users/track` | Internal — child worker registers a user |
 | `POST` | `/api/bots/:id/broadcast` | Broadcast text/photo (personalization vars supported; ~40 recipients / request on free plan) |
+
+### Form Submissions
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/bots/:id/submissions` | List recent form submissions |
+| `DELETE` | `/api/bots/:id/submissions` | Clear all submissions for a bot |
+| `DELETE` | `/api/bots/:id/submissions/:subId` | Delete one submission |
+| `POST` | `/api/bots/:id/submissions/ingest` | Internal — child worker saves a completed form |
 
 ### Media Management
 
@@ -610,6 +616,12 @@ This project is licensed under the **MIT License** — see the [LICENSE](LICENSE
 ---
 
 ## 📝 Changelog
+
+### v1.4.0
+- **Send Form Summary** action (admin / user / both, templates, optional clear keys + state)
+- **Submissions inbox** in the dashboard (view / copy / delete)
+- **Fetch API** reply formats: raw JSON or custom `{key}` templates
+- Cover image + README polish; subrequest-safer submissions/schema paths
 
 ### v1.3.0
 - Import / Export rule templates; advanced match types (contains / exact / starts with / regex)

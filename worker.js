@@ -7,7 +7,7 @@
  * provisions its own D1, KV, and child Workers to build Telegram bots.
  *
  * @author      Hamed Gharghi
- * @version     1.3.0
+ * @version     1.4.0
  * @repository  https://github.com/Hamed-Gharghi/Cloudflare-Telegram-bot-builder
  * @license     MIT
  * ============================================================================
@@ -785,8 +785,35 @@ class CFClient {
     await this.ensureSchema();
   }
 
+  async ensureFormSubmissionsTable() {
+    // Lightweight: do NOT run full ensureSchema (that alone can burn the free-plan 50 subrequest budget)
+    if (CFClient._formSubmissionsReady) return;
+    try {
+      await this.d1Execute(`CREATE TABLE IF NOT EXISTS form_submissions (
+        id TEXT PRIMARY KEY,
+        bot_id INTEGER NOT NULL,
+        telegram_user_id TEXT,
+        chat_id TEXT,
+        first_name TEXT,
+        last_name TEXT,
+        username TEXT,
+        data_json TEXT NOT NULL DEFAULT '{}',
+        keys_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (bot_id) REFERENCES bots(id)
+      )`);
+      await this.d1Execute('CREATE INDEX IF NOT EXISTS idx_form_submissions_bot ON form_submissions(bot_id)');
+      await this.d1Execute('CREATE INDEX IF NOT EXISTS idx_form_submissions_created ON form_submissions(created_at)');
+    } catch {
+      // Table/index may already exist
+    }
+    CFClient._formSubmissionsReady = true;
+  }
+
   // ── Full schema ensure — safe to call anytime (setup, mid-dev, every API hit) ──
   async ensureSchema() {
+    // Cache per Worker isolate — each d1Execute is an HTTP subrequest via the CF REST API
+    if (CFClient._schemaReady) return;
     const statements = [
       `CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -848,6 +875,19 @@ class CFClient {
         UNIQUE(bot_id, telegram_user_id),
         FOREIGN KEY (bot_id) REFERENCES bots(id)
       )`,
+      `CREATE TABLE IF NOT EXISTS form_submissions (
+        id TEXT PRIMARY KEY,
+        bot_id INTEGER NOT NULL,
+        telegram_user_id TEXT,
+        chat_id TEXT,
+        first_name TEXT,
+        last_name TEXT,
+        username TEXT,
+        data_json TEXT NOT NULL DEFAULT '{}',
+        keys_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (bot_id) REFERENCES bots(id)
+      )`,
       'CREATE INDEX IF NOT EXISTS idx_bots_user_id ON bots(user_id)',
       'CREATE INDEX IF NOT EXISTS idx_rules_bot_id ON rules(bot_id)',
       'CREATE INDEX IF NOT EXISTS idx_media_bot_id ON media(bot_id)',
@@ -855,6 +895,8 @@ class CFClient {
       'CREATE INDEX IF NOT EXISTS idx_bot_logs_created ON bot_logs(created_at)',
       'CREATE INDEX IF NOT EXISTS idx_bot_users_bot_id ON bot_users(bot_id)',
       'CREATE INDEX IF NOT EXISTS idx_bot_users_telegram ON bot_users(telegram_user_id)',
+      'CREATE INDEX IF NOT EXISTS idx_form_submissions_bot ON form_submissions(bot_id)',
+      'CREATE INDEX IF NOT EXISTS idx_form_submissions_created ON form_submissions(created_at)',
     ];
 
     for (const sql of statements) {
@@ -891,6 +933,7 @@ class CFClient {
     } catch {
       // Index may already exist
     }
+    CFClient._schemaReady = true;
   }
 
   async upsertBotUser(botId, user = {}) {
@@ -1672,7 +1715,7 @@ app.post('/api/bots/:id/import', authMiddleware, async (c) => {
   const allowedTriggers = new Set(['command', 'message', 'callback', 'new_member', 'state']);
   const allowedActions = new Set([
     'send_message', 'send_photo', 'send_document', 'show_keyboard',
-    'store_data', 'fetch_api', 'forward', 'set_state', 'clear_state',
+    'store_data', 'fetch_api', 'forward', 'set_state', 'clear_state', 'send_form_summary',
   ]);
 
   const normalized = [];
@@ -2119,6 +2162,255 @@ app.delete('/api/bots/:id/logs', authMiddleware, async (c) => {
   }
 
   return c.json({ success: true, message: '✅ Logs cleared!' });
+});
+
+// ── Form Submissions inbox ──────────────────────────────────
+app.post('/api/bots/:id/submissions/ingest', async (c) => {
+  const cf = getCFClient(c);
+  if (!cf) return c.json({ error: 'Not initialized' }, 400);
+
+  await cf.ensureFormSubmissionsTable();
+
+  const botId = parseInt(c.req.param('id'));
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON' }, 400); }
+  const token = body?.token;
+  const submission = body?.submission;
+  if (!token || !submission || typeof submission !== 'object') {
+    return c.json({ error: 'token and submission required' }, 400);
+  }
+
+  const bots = await cf.d1Query('SELECT bot_token FROM bots WHERE id = ?', [botId]);
+  if (bots.length === 0) return c.json({ error: 'Bot not found' }, 404);
+  if (bots[0].bot_token !== token) return c.json({ error: 'Unauthorized' }, 403);
+
+  const id = String(submission.id || '').trim() || (Date.now() + '-' + Math.random().toString(36).slice(2, 8));
+  const entry = {
+    ...submission,
+    id,
+    bot_id: String(botId),
+    telegram_user_id: String(submission.telegram_user_id || ''),
+    chat_id: String(submission.chat_id || submission.telegram_user_id || ''),
+    first_name: submission.first_name || null,
+    last_name: submission.last_name || null,
+    username: submission.username || null,
+    keys: Array.isArray(submission.keys) ? submission.keys : [],
+    data: submission.data && typeof submission.data === 'object' ? submission.data : {},
+    created_at: submission.created_at || new Date().toISOString(),
+  };
+
+  // D1 (durable — what the dashboard prefers)
+  try {
+    await cf.d1Execute(
+      `INSERT OR REPLACE INTO form_submissions
+        (id, bot_id, telegram_user_id, chat_id, first_name, last_name, username, data_json, keys_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        entry.id,
+        botId,
+        entry.telegram_user_id,
+        entry.chat_id,
+        entry.first_name,
+        entry.last_name,
+        entry.username,
+        JSON.stringify(entry.data),
+        JSON.stringify(entry.keys),
+        entry.created_at,
+      ]
+    );
+  } catch (e) {
+    console.error('D1 submission ingest failed:', e.message);
+    return c.json({ error: 'D1 write failed: ' + e.message }, 500);
+  }
+
+  // Skip parent KV mirror here — free plan has only 50 subrequests/invocation.
+  // Child already keeps a local KV copy; dashboard reads D1 first.
+  return c.json({ success: true, id });
+});
+
+app.get('/api/bots/:id/submissions', authMiddleware, async (c) => {
+  const cf = getCFClient(c);
+  if (!cf) return c.json({ error: 'Not initialized' }, 400);
+
+  await cf.ensureFormSubmissionsTable();
+
+  const userId = c.get('userId');
+  const botId = parseInt(c.req.param('id'));
+  const url = new URL(c.req.url, 'http://localhost');
+  const limit = Math.min(parseInt(url.searchParams.get('limit') || '100', 10) || 100, 200);
+
+  const bots = await cf.d1Query(
+    'SELECT id, bot_token, worker_url FROM bots WHERE id = ? AND user_id = ?',
+    [botId, userId]
+  );
+  if (bots.length === 0) return c.json({ error: 'Bot not found' }, 404);
+  const bot = bots[0];
+
+  const byId = new Map();
+  const sources = { d1: 0, worker: 0, kv: 0 };
+
+  // 1) D1 (primary — fewest subrequests)
+  try {
+    const rows = await cf.d1Query(
+      'SELECT * FROM form_submissions WHERE bot_id = ? ORDER BY created_at DESC LIMIT ?',
+      [botId, limit]
+    );
+    sources.d1 = (rows || []).length;
+    for (const row of rows || []) {
+      let data = {};
+      let keys = [];
+      try { data = JSON.parse(row.data_json || '{}'); } catch (_) {}
+      try { keys = JSON.parse(row.keys_json || '[]'); } catch (_) {}
+      byId.set(String(row.id), {
+        id: row.id,
+        bot_id: botId,
+        telegram_user_id: row.telegram_user_id,
+        chat_id: row.chat_id,
+        first_name: row.first_name,
+        last_name: row.last_name,
+        username: row.username,
+        data,
+        keys,
+        created_at: row.created_at,
+        source: 'd1',
+      });
+    }
+  } catch (e) {
+    console.error('D1 submissions query failed:', e.message);
+  }
+
+  // 2/3) Only hit worker + KV if D1 is empty (saves free-plan subrequest budget)
+  if (byId.size === 0) {
+    const workerUrl = String(bot.worker_url || '').replace(/\/$/, '');
+    if (workerUrl && bot.bot_token) {
+      try {
+        const relayRes = await fetch(workerUrl + '/submissions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: bot.bot_token, action: 'list', limit }),
+        });
+        const relayData = await relayRes.json().catch(() => ({}));
+        if (relayRes.ok && Array.isArray(relayData.submissions)) {
+          sources.worker = relayData.submissions.length;
+          for (const s of relayData.submissions) {
+            if (!s || !s.id) continue;
+            byId.set(String(s.id), { ...s, source: 'worker' });
+          }
+        }
+      } catch (e) {
+        console.error('worker submissions relay failed:', e.message);
+      }
+    }
+
+    if (byId.size === 0) {
+      try {
+        const raw = await cf.kvGet(`botsubmissions:${botId}`);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            sources.kv = parsed.length;
+            for (const s of parsed) {
+              if (!s || !s.id) continue;
+              byId.set(String(s.id), { ...s, source: 'kv' });
+            }
+          }
+        }
+      } catch (e) {
+        console.error('KV submissions read failed:', e.message);
+      }
+    }
+  }
+
+  const submissions = [...byId.values()]
+    .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
+    .slice(0, limit);
+
+  return c.json({
+    submissions,
+    totalCount: submissions.length,
+    sources,
+  });
+});
+
+app.delete('/api/bots/:id/submissions', authMiddleware, async (c) => {
+  const cf = getCFClient(c);
+  if (!cf) return c.json({ error: 'Not initialized' }, 400);
+
+  await cf.ensureFormSubmissionsTable();
+
+  const userId = c.get('userId');
+  const botId = parseInt(c.req.param('id'));
+  const bots = await cf.d1Query(
+    'SELECT id, bot_token, worker_url FROM bots WHERE id = ? AND user_id = ?',
+    [botId, userId]
+  );
+  if (bots.length === 0) return c.json({ error: 'Bot not found' }, 404);
+  const bot = bots[0];
+
+  try { await cf.d1Execute('DELETE FROM form_submissions WHERE bot_id = ?', [botId]); } catch (_) {}
+  try { await cf.kvDelete(`botsubmissions:${botId}`); } catch (_) {}
+
+  const workerUrl = String(bot.worker_url || '').replace(/\/$/, '');
+  if (workerUrl && bot.bot_token) {
+    try {
+      await fetch(workerUrl + '/submissions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: bot.bot_token, action: 'clear' }),
+      });
+    } catch (_) {}
+  }
+
+  return c.json({ success: true, message: '✅ Submissions cleared!' });
+});
+
+app.delete('/api/bots/:id/submissions/:subId', authMiddleware, async (c) => {
+  const cf = getCFClient(c);
+  if (!cf) return c.json({ error: 'Not initialized' }, 400);
+
+  await cf.ensureFormSubmissionsTable();
+
+  const userId = c.get('userId');
+  const botId = parseInt(c.req.param('id'));
+  const subId = String(c.req.param('subId') || '').trim();
+  if (!subId) return c.json({ error: 'Submission id required' }, 400);
+
+  const bots = await cf.d1Query(
+    'SELECT id, bot_token, worker_url FROM bots WHERE id = ? AND user_id = ?',
+    [botId, userId]
+  );
+  if (bots.length === 0) return c.json({ error: 'Bot not found' }, 404);
+  const bot = bots[0];
+
+  try { await cf.d1Execute('DELETE FROM form_submissions WHERE bot_id = ? AND id = ?', [botId, subId]); } catch (_) {}
+
+  try {
+    const listKey = `botsubmissions:${botId}`;
+    const raw = await cf.kvGet(listKey);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const next = parsed.filter((s) => String(s?.id) !== subId);
+        await cf.kvPut(listKey, JSON.stringify(next), 86400 * 90);
+      }
+    }
+    await cf.kvDelete(`botsubmission:${botId}:${subId}`).catch(() => null);
+  } catch (e) {
+    console.error('KV submission delete failed:', e.message);
+  }
+
+  const workerUrl = String(bot.worker_url || '').replace(/\/$/, '');
+  if (workerUrl && bot.bot_token) {
+    try {
+      await fetch(workerUrl + '/submissions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: bot.bot_token, action: 'delete', id: subId }),
+      });
+    } catch (_) {}
+  }
+
+  return c.json({ success: true, deleted: subId });
 });
 
 // Get log stats for a bot
@@ -2801,6 +3093,60 @@ async function setUserState(env, userId, state) {
   return true;
 }
 
+async function saveFormSubmission(env, opts) {
+  opts = opts || {};
+  const from = opts.from;
+  const chatId = opts.chatId;
+  const data = opts.data;
+  const keys = opts.keys;
+  if (!env.BOT_DATA || !from || from.id == null || from.id === '') return null;
+  const botId = String(env.BOT_ID || '0');
+  const id = Date.now() + '-' + from.id + '-' + Math.random().toString(36).slice(2, 8);
+  const entry = {
+    id: id,
+    bot_id: botId,
+    telegram_user_id: String(from.id),
+    chat_id: String(chatId != null ? chatId : from.id),
+    first_name: from.first_name || null,
+    last_name: from.last_name || null,
+    username: from.username || null,
+    keys: Array.isArray(keys) ? keys : Object.keys(data || {}),
+    data: data && typeof data === 'object' ? data : {},
+    created_at: new Date().toISOString(),
+  };
+
+  const listKey = 'botsubmissions:' + botId;
+  let list = [];
+  try {
+    const prev = await env.BOT_DATA.get(listKey);
+    if (prev) {
+      const parsed = JSON.parse(prev);
+      if (Array.isArray(parsed)) list = parsed;
+    }
+  } catch (_) {}
+  list.unshift(entry);
+  await env.BOT_DATA.put(listKey, JSON.stringify(list.slice(0, 200)), { expirationTtl: 86400 * 90 });
+
+  // Mirror to parent D1 so the dashboard inbox fills (skip extra per-entry KV write to save subrequests)
+  const parentUrl = env.PARENT_URL || '';
+  const botToken = env.BOT_TOKEN || '';
+  if (parentUrl && botToken) {
+    try {
+      const res = await fetch(parentUrl + '/api/bots/' + botId + '/submissions/ingest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: botToken, submission: entry }),
+      });
+      if (!res.ok) {
+        console.error('submission parent ingest failed:', res.status, await res.text());
+      }
+    } catch (e) {
+      console.error('submission parent ingest request failed:', e.message);
+    }
+  }
+  return entry;
+}
+
 async function tg(env, method, body) {
   if (!env.BOT_TOKEN) {
     throw new Error('BOT_TOKEN is not configured');
@@ -3042,6 +3388,103 @@ async function executeAction(env, update, actionType, params) {
       break;
     }
 
+    case 'send_form_summary': {
+      if (!from?.id) break;
+      if (!env.BOT_DATA) {
+        await reply(env, chatId, '⚠️ Storage is not configured for this bot (redeploy with KV).');
+        break;
+      }
+      const keys = String(params.keys || '')
+        .split(/[,\\n]+/)
+        .map(function(k) { return String(k || '').trim(); })
+        .filter(Boolean);
+      const storeAs = String(params.store_current_as || '').trim();
+      if (storeAs) {
+        const curVal = message?.text || message?.caption || '';
+        await env.BOT_DATA.put('user:' + from.id + ':' + storeAs, curVal, { expirationTtl: 86400 * 30 });
+        if (keys.indexOf(storeAs) === -1) keys.push(storeAs);
+      }
+      if (!keys.length) {
+        await reply(env, chatId, '❌ Form summary has no data keys configured.');
+        break;
+      }
+      const formData = {};
+      for (let i = 0; i < keys.length; i++) {
+        const k = keys[i];
+        try {
+          formData[k] = (await env.BOT_DATA.get('user:' + from.id + ':' + k)) || '';
+        } catch (_) {
+          formData[k] = '';
+        }
+      }
+      let template = String(params.template || '').trim();
+      if (!template) {
+        const lines = ['📋 Form submission', 'From: {first_name} (@{username})', 'ID: {user_id}', ''];
+        for (let i = 0; i < keys.length; i++) {
+          lines.push(keys[i] + ': {' + keys[i] + '}');
+        }
+        template = lines.join('\\n');
+      }
+      const tgKeys = { first_name:1, last_name:1, username:1, user_id:1, message:1, chat_title:1, chat_id:1, date:1 };
+      let out = template.replace(/\\{([a-zA-Z0-9_.]+)\\}/g, function(match, key) {
+        if (tgKeys[key]) return match;
+        if (Object.prototype.hasOwnProperty.call(formData, key)) {
+          return formData[key] == null ? '' : String(formData[key]);
+        }
+        return '';
+      });
+      out = replaceVariables(out, update);
+      out = String(out).slice(0, 4000);
+
+      // Persist for dashboard Submissions inbox (before clearing keys)
+      try {
+        const saved = await saveFormSubmission(env, {
+          from: from,
+          chatId: chatId,
+          data: formData,
+          keys: keys,
+        });
+        if (saved && saved.id) {
+          await log('INFO', 'Submission saved: ' + saved.id, env, { user: from, chatId: chatId });
+        } else {
+          await log('WARNING', 'Submission not saved (missing storage or user id)', env, { user: from, chatId: chatId });
+        }
+      } catch (e) {
+        console.error('saveFormSubmission failed:', e.message);
+        await log('ERROR', 'Submission save failed: ' + (e.message || e), env, { user: from, chatId: chatId });
+      }
+
+      const sendTo = String(params.send_to || 'admin').toLowerCase();
+      const adminId = params.admin_id;
+      if (sendTo === 'admin' || sendTo === 'both') {
+        if (adminId) {
+          await reply(env, adminId, out);
+        } else {
+          await reply(env, chatId, '❌ Admin ID not configured for form summary.');
+        }
+      }
+      if (sendTo === 'user' || sendTo === 'both') {
+        await reply(env, chatId, out);
+      }
+      const confirm = String(params.confirm_text || '').trim();
+      if (confirm && sendTo === 'admin') {
+        await reply(env, chatId, replaceVariables(confirm, update));
+      }
+
+      const clearKeys = String(params.clear_keys == null ? 'yes' : params.clear_keys).toLowerCase() !== 'no';
+      const clearStateFlag = String(params.clear_state == null ? 'yes' : params.clear_state).toLowerCase() !== 'no';
+      if (clearKeys) {
+        for (let i = 0; i < keys.length; i++) {
+          try { await env.BOT_DATA.delete('user:' + from.id + ':' + keys[i]); } catch (_) {}
+        }
+      }
+      if (clearStateFlag) {
+        await setUserState(env, from.id, '');
+      }
+      await log('INFO', 'Form summary sent for user ' + from.id + ' (' + keys.join(',') + ')', env);
+      break;
+    }
+
     default:
       await reply(env, chatId, 'Unknown action: ' + actionType);
   }
@@ -3167,19 +3610,27 @@ async function handleUpdate(update, env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    const path = (url.pathname.replace(/\\/+$/, '') || '/');
 
-    if (request.method === 'GET' && (url.pathname === '/health' || url.pathname === '/')) {
+    if (request.method === 'GET' && (path === '/health' || path === '/')) {
       return Response.json({
         ok: true,
         hasToken: Boolean(env.BOT_TOKEN),
         rules: rules.length,
         service: 'telegram-bot',
-        engine: 'HG-TeleFlare v1.3.0',
+        engine: 'HG-TeleFlare v1.4.0',
         author: 'Hamed Gharghi',
+        features: ['submissions', 'broadcast', 'forms'],
+        build: 'submissions-inbox',
+      }, {
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'no-store',
+        },
       });
     }
 
-    if (request.method === 'POST' && (url.pathname === '/webhook' || url.pathname === '/')) {
+    if (request.method === 'POST' && (path === '/webhook' || path === '/')) {
       try {
         const update = await request.json();
         await log('INFO', 'Webhook received', env);
@@ -3193,7 +3644,7 @@ export default {
     }
 
     // Parent dashboard asks this bot for subscribers (KV binding list — sees local writes)
-    if (request.method === 'POST' && url.pathname === '/subscribers') {
+    if (request.method === 'POST' && path === '/subscribers') {
       try {
         const body = await request.json();
         if (!body || body.token !== env.BOT_TOKEN) {
@@ -3281,8 +3732,55 @@ export default {
       }
     }
 
+    // Parent dashboard: list / clear / delete form submissions
+    if (request.method === 'POST' && path === '/submissions') {
+      try {
+        const body = await request.json();
+        if (!body || body.token !== env.BOT_TOKEN) {
+          return Response.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
+        }
+        if (!env.BOT_DATA) {
+          return Response.json({ ok: true, submissions: [], error: 'BOT_DATA missing' });
+        }
+        const botId = String(env.BOT_ID || '0');
+        const listKey = 'botsubmissions:' + botId;
+        const action = String(body.action || 'list').toLowerCase();
+
+        async function readList() {
+          try {
+            const raw = await env.BOT_DATA.get(listKey);
+            if (!raw) return [];
+            const parsed = JSON.parse(raw);
+            return Array.isArray(parsed) ? parsed : [];
+          } catch (_) {
+            return [];
+          }
+        }
+
+        if (action === 'clear') {
+          await env.BOT_DATA.delete(listKey);
+          return Response.json({ ok: true, cleared: true });
+        }
+
+        if (action === 'delete') {
+          const delId = String(body.id || '').trim();
+          if (!delId) return Response.json({ ok: false, error: 'id required' }, { status: 400 });
+          const list = (await readList()).filter(function(s) { return String(s && s.id) !== delId; });
+          await env.BOT_DATA.put(listKey, JSON.stringify(list.slice(0, 200)), { expirationTtl: 86400 * 90 });
+          try { await env.BOT_DATA.delete('botsubmission:' + botId + ':' + delId); } catch (_) {}
+          return Response.json({ ok: true, deleted: delId });
+        }
+
+        const limit = Math.min(parseInt(body.limit || '100', 10) || 100, 200);
+        const submissions = (await readList()).slice(0, limit);
+        return Response.json({ ok: true, submissions: submissions, totalCount: submissions.length, source: 'worker' });
+      } catch (err) {
+        return Response.json({ ok: false, error: String(err.message || err) }, { status: 500 });
+      }
+    }
+
     // Parent dashboard relays broadcasts through this bot (uses the live BOT_TOKEN)
-    if (request.method === 'POST' && url.pathname === '/broadcast') {
+    if (request.method === 'POST' && path === '/broadcast') {
       try {
         const body = await request.json();
         if (!body || body.token !== env.BOT_TOKEN) {
@@ -3413,6 +3911,11 @@ app.post('/api/bots/:id/deploy', authMiddleware, async (c) => {
 
     const scriptName = `tb-${(bot.bot_username || String(botId)).toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')}`;
     const code = generateBotScript(botRules);
+    if (!code.includes("build: 'submissions-inbox'") || !code.includes('Submission saved')) {
+      return c.json({
+        error: 'Generated bot script is missing Submissions support. Paste the latest parent worker.js, deploy the parent, then try again.',
+      }, 500);
+    }
 
     const host2 = new URL(c.req.url || c.request.url);
     const parentUrl = host2.origin;
@@ -3441,6 +3944,8 @@ app.post('/api/bots/:id/deploy', authMiddleware, async (c) => {
       [workerUrl, result.scriptName || scriptName, botId]
     );
 
+    // Do NOT health-check here — deploy already uses many CF API subrequests (free plan = 50).
+    // The dashboard verifies /health from the browser after deploy.
     const warning = result.readinessWarning ? ` ⚠️ ${result.readinessWarning}` : '';
     return c.json({
       message: `✅ Bot deployed! @${bot.bot_username} is live.${warning}`,
@@ -3449,6 +3954,8 @@ app.post('/api/bots/:id/deploy', authMiddleware, async (c) => {
       webhookUrl: `${workerUrl}/webhook`,
       webhook: result.webhook?.result || null,
       readinessWarning: result.readinessWarning || null,
+      verifyHealthUrl: `${String(workerUrl).replace(/\/$/, '')}/health`,
+      expectBuild: 'submissions-inbox',
     });
   } catch (e) {
     return c.json({ error: 'Deployment failed: ' + e.message }, 500);
@@ -4526,6 +5033,66 @@ app.get('/', (c) => {
       line-height: 1.45;
       white-space: pre-wrap;
     }
+    .submission-panel {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    .submission-row {
+      display: grid;
+      grid-template-columns: 150px minmax(120px, 180px) 1fr auto;
+      gap: 10px;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.85rem;
+      align-items: center;
+      cursor: pointer;
+      transition: background 0.15s ease;
+    }
+    .submission-row:hover { background: rgba(28, 42, 68, 0.32); }
+    .submission-row:last-child { border-bottom: none; }
+    .submission-user { color: var(--text); font-weight: 600; }
+    .submission-preview {
+      color: var(--text-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.8rem;
+    }
+    .submission-actions { display: flex; gap: 6px; flex-shrink: 0; }
+    .submission-detail-grid {
+      display: grid;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .submission-detail-row {
+      display: grid;
+      grid-template-columns: 120px 1fr;
+      gap: 10px;
+      padding: 8px 10px;
+      background: rgba(28, 42, 68, 0.26);
+      border-radius: 8px;
+      font-size: 0.9rem;
+    }
+    .submission-detail-key {
+      color: var(--text-muted);
+      font-weight: 600;
+      word-break: break-word;
+    }
+    .submission-detail-val {
+      word-break: break-word;
+      white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.85rem;
+    }
+    @media (max-width: 720px) {
+      .submission-row {
+        grid-template-columns: 1fr;
+        align-items: flex-start;
+      }
+    }
     .subscribers-list {
       max-height: 420px;
       overflow: auto;
@@ -4676,7 +5243,7 @@ app.get('/', (c) => {
         <div class="logo">
           <span class="logo-mark">🤖</span>
           <span class="logo-text">Bot Builder</span>
-          <span class="version-badge"><span class="dot">●</span> v1.3.0 <span style="opacity:0.5">by</span> Hamed Gharghi</span>
+          <span class="version-badge"><span class="dot">●</span> v1.4.0 <span style="opacity:0.5">by</span> Hamed Gharghi</span>
         </div>
         <div style="display:flex;align-items:center;gap:12px">
           <span id="userDisplay" style="color:var(--text-muted);font-size:0.9rem"></span>
@@ -5406,6 +5973,7 @@ app.get('/', (c) => {
                       </label>
                     </div>
                     <div class="action-row action-row-secondary">
+                      <button class="btn btn-ghost btn-sm" onclick="showSubmissions(\${bot.id}, event)" title="Form submissions">📥 Submissions</button>
                       <button class="btn btn-ghost btn-sm" onclick="showLogs(\${bot.id}, event)" title="View bot logs">📋 Logs</button>
                       <button class="btn btn-ghost btn-sm" onclick="showEditBotModal(\${bot.id})" title="Change bot token">🔑 Edit Token</button>
                       <button class="btn btn-danger btn-sm" onclick="deleteBot(\${bot.id})">Delete</button>
@@ -5796,9 +6364,22 @@ app.get('/', (c) => {
         }
 
         const data = await api('/bots/' + botId + '/deploy', { method: 'POST' });
-        let msg = data.message || 'Bot deployed!';
-        if (data.workerUrl) msg += ' URL: ' + data.workerUrl;
-        toast(msg, 'success');
+        const healthUrl = data.verifyHealthUrl || ((data.workerUrl || '').replace(/\\/$/, '') + '/health');
+        let ready = false;
+        if (healthUrl && healthUrl.indexOf('http') === 0) {
+          for (let i = 0; i < 6; i++) {
+            try {
+              const r = await fetch(healthUrl, { cache: 'no-store' });
+              const health = await r.json().catch(function() { return null; });
+              if (health && Array.isArray(health.features) && health.features.indexOf('submissions') !== -1) {
+                ready = true;
+                break;
+              }
+            } catch (e) {}
+            await new Promise(function(resolve) { setTimeout(resolve, 1500); });
+          }
+        }
+        toast(ready ? (data.message || 'Bot deployed!') : ((data.message || 'Bot deployed!') + ' (propagation may take a few seconds)'), 'success');
         if (state.currentBot && state.currentBot.id === botId) {
           state.currentBot.worker_url = data.workerUrl;
         }
@@ -5967,6 +6548,166 @@ app.get('/', (c) => {
       }
     }
 
+    // ── Form Submissions Inbox ──
+    async function showSubmissions(botId, ev) {
+      const bot = state.bots.find(b => b.id === botId) || state.currentBot;
+      if (!bot) { toast('Bot not found', 'error'); return; }
+
+      const btn = eventButton(ev);
+      setButtonLoading(btn, true, 'Loading...');
+      showPageLoading('Loading submissions', 'Reading form inbox...');
+
+      try {
+        const data = await api('/bots/' + botId + '/submissions?limit=100');
+        const list = data.submissions || [];
+        state._submissionsCache = list;
+        state._submissionsBotId = botId;
+
+        const content = document.getElementById('pageContent');
+        const botTitle = escapeHtml(bot.bot_name || bot.bot_username || 'Bot #' + botId);
+
+        let bodyHtml;
+        if (list.length === 0) {
+          bodyHtml =
+            '<div class="empty-state" style="padding:40px">' +
+              '<div class="icon">📥</div>' +
+              '<h3>No submissions yet</h3>' +
+              '<p style="max-width:420px;margin:0 auto">' +
+                'When users complete a form with <strong>Send Form Summary</strong>, their answers will show up here.' +
+              '</p>' +
+            '</div>';
+        } else {
+          const rows = list.map(function(sub, idx) {
+            const rawTs = sub.created_at || '';
+            const ts = rawTs ? new Date(rawTs) : null;
+            const timeLabel = ts && !isNaN(ts.getTime()) ? ts.toLocaleString() : '--';
+            const uname = sub.username ? '@' + sub.username : (sub.first_name || ('User ' + (sub.telegram_user_id || '')));
+            const dataObj = sub.data && typeof sub.data === 'object' ? sub.data : {};
+            const preview = Object.keys(dataObj).slice(0, 4).map(function(k) {
+              return k + ': ' + String(dataObj[k] == null ? '' : dataObj[k]).slice(0, 40);
+            }).join(' · ') || '(empty)';
+            const safeId = encodeURIComponent(String(sub.id || ''));
+            return (
+              '<div class="submission-row" onclick="openSubmissionDetail(' + idx + ')">' +
+                '<span class="log-time">' + escapeHtml(timeLabel) + '</span>' +
+                '<span class="submission-user">' + escapeHtml(uname) + '</span>' +
+                '<span class="submission-preview">' + escapeHtml(preview) + '</span>' +
+                '<span class="submission-actions" onclick="event.stopPropagation()">' +
+                  '<button class="btn btn-ghost btn-sm" onclick="openSubmissionDetail(' + idx + ')">View</button>' +
+                  '<button class="btn btn-danger btn-sm" onclick="deleteSubmission(' + botId + ', \\'' + safeId + '\\')">Delete</button>' +
+                '</span>' +
+              '</div>'
+            );
+          }).join('');
+          bodyHtml =
+            '<div class="submission-panel">' + rows + '</div>' +
+            '<div style="padding:10px 16px;font-size:0.8rem;color:var(--text-muted)">' +
+              'Showing ' + list.length + ' submission' + (list.length === 1 ? '' : 's') +
+            '</div>';
+        }
+
+        content.innerHTML =
+          '<div class="page-header">' +
+            '<div>' +
+              '<button class="btn btn-ghost btn-sm" onclick="showBotBuilder(' + botId + ')" style="margin-bottom:8px">← Back to Builder</button>' +
+              '<div class="section-kicker">Forms</div>' +
+              '<h1>📥 Submissions: ' + botTitle + '</h1>' +
+              '<p style="color:var(--text-muted);font-size:0.85rem">' +
+                list.length + ' recent form result' + (list.length === 1 ? '' : 's') +
+              '</p>' +
+            '</div>' +
+            '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+              '<button class="btn btn-ghost btn-sm" onclick="showSubmissions(' + botId + ', event)">🔄 Refresh</button>' +
+              '<button class="btn btn-danger btn-sm" onclick="clearSubmissions(' + botId + ')">🗑️ Clear All</button>' +
+            '</div>' +
+          '</div>' +
+          bodyHtml;
+      } catch (e) {
+        toast(e.message, 'error');
+        setButtonLoading(btn, false);
+      }
+    }
+
+    function openSubmissionDetail(idx) {
+      const list = state._submissionsCache || [];
+      const sub = list[idx];
+      if (!sub) { toast('Submission not found', 'error'); return; }
+      const dataObj = sub.data && typeof sub.data === 'object' ? sub.data : {};
+      const keys = Array.isArray(sub.keys) && sub.keys.length ? sub.keys : Object.keys(dataObj);
+      const uname = sub.username ? '@' + sub.username : (sub.first_name || 'User');
+      const rawTs = sub.created_at || '';
+      const ts = rawTs ? new Date(rawTs) : null;
+      const timeLabel = ts && !isNaN(ts.getTime()) ? ts.toLocaleString() : '--';
+
+      const rows = keys.map(function(k) {
+        const v = dataObj[k] == null ? '' : String(dataObj[k]);
+        return (
+          '<div class="submission-detail-row">' +
+            '<div class="submission-detail-key">' + escapeHtml(k) + '</div>' +
+            '<div class="submission-detail-val">' + escapeHtml(v) + '</div>' +
+          '</div>'
+        );
+      }).join('') || '<p style="color:var(--text-muted)">No fields stored.</p>';
+
+      const copyText = [
+        'Form submission',
+        'From: ' + uname + ' (' + (sub.telegram_user_id || '') + ')',
+        'When: ' + timeLabel,
+        '',
+      ].concat(keys.map(function(k) {
+        return k + ': ' + (dataObj[k] == null ? '' : String(dataObj[k]));
+      })).join('\\n');
+
+      state._submissionCopyText = copyText;
+      const modal = document.getElementById('modalContent');
+      modal.innerHTML =
+        '<button class="modal-close" onclick="closeModal()">&times;</button>' +
+        '<h2>📥 Submission</h2>' +
+        '<p style="color:var(--text-muted);margin-bottom:8px">' +
+          escapeHtml(uname) + ' · ID ' + escapeHtml(String(sub.telegram_user_id || '')) + '<br>' +
+          escapeHtml(timeLabel) +
+        '</p>' +
+        '<div class="submission-detail-grid">' + rows + '</div>' +
+        '<div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">' +
+          '<button class="btn btn-ghost" onclick="copySubmissionText()">📋 Copy</button>' +
+          '<button class="btn btn-primary" onclick="closeModal()">Close</button>' +
+        '</div>';
+      document.getElementById('modalOverlay').classList.add('show');
+    }
+
+    function copySubmissionText() {
+      const text = state._submissionCopyText || '';
+      navigator.clipboard.writeText(text)
+        .then(function() { toast('Copied!', 'success'); })
+        .catch(function() { toast('Failed to copy', 'error'); });
+    }
+
+    async function deleteSubmission(botId, encodedId) {
+      const subId = decodeURIComponent(encodedId || '');
+      if (!subId) return;
+      if (!confirm('Delete this submission?')) return;
+      try {
+        await api('/bots/' + botId + '/submissions/' + encodeURIComponent(subId), { method: 'DELETE' });
+        toast('Deleted', 'success');
+        showSubmissions(botId);
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    }
+
+    async function clearSubmissions(botId) {
+      if (!confirm('Clear all form submissions for this bot? This cannot be undone.')) return;
+      showPageLoading('Clearing submissions', 'Please wait...');
+      try {
+        await api('/bots/' + botId + '/submissions', { method: 'DELETE' });
+        toast('Submissions cleared!', 'success');
+        showSubmissions(botId);
+      } catch (e) {
+        toast(e.message, 'error');
+        showSubmissions(botId);
+      }
+    }
+
     // ── Media Manager ──
     async function showMediaManager(botId, ev) {
       const bot = state.bots.find(b => b.id === botId) || state.currentBot;
@@ -6130,6 +6871,8 @@ app.get('/', (c) => {
         'actionText', 'actionButtons', 'actionKeyboardType', 'actionDataKey', 'actionDataValue',
         'actionApiUrl', 'actionApiMethod', 'actionApiBody', 'actionApiResponseMode', 'actionApiResponseTemplate', 'actionAdminId',
         'actionPhotoUrl', 'actionCaption', 'actionDocUrl', 'actionDocCaption', 'actionStateName',
+        'actionFormKeys', 'actionFormStoreCurrent', 'actionFormTemplate', 'actionFormSendTo', 'actionFormConfirm',
+        'actionFormClearKeys', 'actionFormClearState',
       ];
       const fields = {};
       for (const id of ids) {
@@ -6165,6 +6908,7 @@ app.get('/', (c) => {
         if (el) el.value = fields[id];
       }
       if (draft.actionType === 'fetch_api') updateFetchResponseFields();
+      if (draft.actionType === 'send_form_summary') updateFormSummaryFields();
       if (pendingMedia && pendingMedia.targetId) {
         const el = document.getElementById(pendingMedia.targetId);
         if (el) el.value = pendingMedia.url || '';
@@ -6276,6 +7020,7 @@ app.get('/', (c) => {
             <input type="file" id="importTemplateFile" accept="application/json,.json" style="display:none" onchange="importBotTemplate(\${bot.id}, this)">
             <button class="btn btn-success" data-bot-id="\${bot.id}" onclick="deployBot(\${bot.id})">🚀 Deploy</button>
             <button class="btn btn-ghost btn-sm" onclick="showBroadcast(\${bot.id}, event)" title="Broadcast / newsletter">📢 Broadcast</button>
+            <button class="btn btn-ghost btn-sm" onclick="showSubmissions(\${bot.id}, event)" title="Form submissions">📥 Submissions</button>
             <button class="btn btn-ghost btn-sm" onclick="showLogs(\${bot.id}, event)" title="View logs">📋 Logs</button>
             <button class="btn btn-ghost btn-sm" onclick="showEditBotModal(\${bot.id})" title="Change bot token">🔑</button>
             <button class="btn btn-ghost btn-sm" onclick="showMediaManager(\${bot.id}, event)" title="Manage uploaded media">🖼️ Media</button>
@@ -6394,6 +7139,7 @@ app.get('/', (c) => {
         forward: '↗️ Forward',
         set_state: '🔁 Set State',
         clear_state: '🧹 Clear State',
+        send_form_summary: '📋 Form Summary',
       };
       return types[rule.action_type] || rule.action_type;
     }
@@ -6414,6 +7160,10 @@ app.get('/', (c) => {
           case 'forward': return 'To admin: ' + (params.admin_id||'not set');
           case 'set_state': return 'State → ' + (params.state || '') + (params.text ? ' · ask: "' + String(params.text).slice(0,40) + '"' : '');
           case 'clear_state': return 'Clear conversation state' + (params.text ? ' · "' + String(params.text).slice(0,40) + '"' : '');
+          case 'send_form_summary': {
+            const keys = String(params.keys || '').split(/[,\\n]+/).filter(Boolean).slice(0, 4).join(', ');
+            return (params.send_to || 'admin') + ' · ' + (keys || 'no keys') + (String(params.keys||'').split(/[,\\n]+/).filter(Boolean).length > 4 ? '…' : '');
+          }
           default: return JSON.stringify(params);
         }
       } catch(e) { return rule.action_params; }
@@ -6504,6 +7254,7 @@ app.get('/', (c) => {
             <option value="forward" \${rule && rule.action_type === 'forward' ? 'selected' : ''}>Forward to Admin</option>
             <option value="set_state" \${rule && rule.action_type === 'set_state' ? 'selected' : ''}>Set State (ask next question)</option>
             <option value="clear_state" \${rule && rule.action_type === 'clear_state' ? 'selected' : ''}>Clear State (end form)</option>
+            <option value="send_form_summary" \${rule && rule.action_type === 'send_form_summary' ? 'selected' : ''}>Send Form Summary</option>
           </select>
         </div>
         <div id="actionParamsFields">
@@ -6563,6 +7314,23 @@ app.get('/', (c) => {
       if (docCaptionEl && params.document_caption) docCaptionEl.value = params.document_caption;
       const stateEl = document.getElementById('actionStateName');
       if (stateEl && params.state) stateEl.value = params.state;
+      const formKeysEl = document.getElementById('actionFormKeys');
+      if (formKeysEl && params.keys) formKeysEl.value = params.keys;
+      const formStoreEl = document.getElementById('actionFormStoreCurrent');
+      if (formStoreEl && params.store_current_as) formStoreEl.value = params.store_current_as;
+      const formTplEl = document.getElementById('actionFormTemplate');
+      if (formTplEl && params.template) formTplEl.value = params.template;
+      const formSendEl = document.getElementById('actionFormSendTo');
+      if (formSendEl && params.send_to) formSendEl.value = params.send_to;
+      const formAdminEl = document.getElementById('actionAdminId');
+      if (formAdminEl && params.admin_id) formAdminEl.value = params.admin_id;
+      const formConfirmEl = document.getElementById('actionFormConfirm');
+      if (formConfirmEl && params.confirm_text) formConfirmEl.value = params.confirm_text;
+      const formClearKeysEl = document.getElementById('actionFormClearKeys');
+      if (formClearKeysEl && params.clear_keys != null) formClearKeysEl.value = String(params.clear_keys);
+      const formClearStateEl = document.getElementById('actionFormClearState');
+      if (formClearStateEl && params.clear_state != null) formClearStateEl.value = String(params.clear_state);
+      if (document.getElementById('actionFormSendTo')) updateFormSummaryFields();
     }
 
     function updateTriggerFields() {
@@ -6678,15 +7446,66 @@ app.get('/', (c) => {
             <textarea class="form-input" id="actionText" rows="3" placeholder="Thanks! You're all set."></textarea>
           </div>
         \`,
+        send_form_summary: \`
+          <div class="form-group"><label>Stored Data Keys</label>
+            <input class="form-input" id="actionFormKeys" placeholder="name, email, phone">
+            <div style="font-size:0.75rem;color:var(--text-muted);margin-top:4px">Comma-separated keys previously saved with <strong>Store Data</strong>.</div>
+          </div>
+          <div class="form-group"><label>Also Save Current Message As (optional)</label>
+            <input class="form-input" id="actionFormStoreCurrent" placeholder="e.g. phone">
+            <div style="font-size:0.75rem;color:var(--text-muted);margin-top:4px">Use this on the last form step so you don't need a separate Store Data rule.</div>
+          </div>
+          <div class="form-group"><label>Summary Template (optional)</label>
+            <textarea class="form-input" id="actionFormTemplate" rows="5" placeholder="📋 New submission&#10;From: {first_name} (@{username})&#10;&#10;Name: {name}&#10;Email: {email}"></textarea>
+            <div style="font-size:0.75rem;color:var(--text-muted);margin-top:4px">Leave empty for an auto summary. Use <code>{key}</code> for stored fields + <code>{first_name}</code> <code>{username}</code> <code>{user_id}</code>.</div>
+          </div>
+          <div class="form-group"><label>Send To</label>
+            <select class="form-input" id="actionFormSendTo" onchange="updateFormSummaryFields()">
+              <option value="admin">Admin only</option>
+              <option value="user">User only</option>
+              <option value="both">Admin + User</option>
+            </select>
+          </div>
+          <div class="form-group" id="actionFormAdminGroup">
+            <label>Admin User ID</label>
+            <input class="form-input" id="actionAdminId" placeholder="Telegram user ID">
+          </div>
+          <div class="form-group" id="actionFormConfirmGroup">
+            <label>User Confirmation (optional)</label>
+            <input class="form-input" id="actionFormConfirm" placeholder="Thanks! Your form was submitted.">
+            <div style="font-size:0.75rem;color:var(--text-muted);margin-top:4px">Sent to the user when summary goes to admin only.</div>
+          </div>
+          <div class="form-group"><label>Clear Stored Keys After Send</label>
+            <select class="form-input" id="actionFormClearKeys">
+              <option value="yes">Yes</option>
+              <option value="no">No</option>
+            </select>
+          </div>
+          <div class="form-group"><label>Clear Conversation State After Send</label>
+            <select class="form-input" id="actionFormClearState">
+              <option value="yes">Yes (end form)</option>
+              <option value="no">No</option>
+            </select>
+          </div>
+        \`,
       };
       container.innerHTML = fields[type] || '<p style="color:var(--text-muted)">No additional parameters needed.</p>';
       if (type === 'fetch_api') updateFetchResponseFields();
+      if (type === 'send_form_summary') updateFormSummaryFields();
     }
 
     function updateFetchResponseFields() {
       const mode = document.getElementById('actionApiResponseMode')?.value || 'raw';
       const group = document.getElementById('actionApiTemplateGroup');
       if (group) group.style.display = mode === 'template' ? 'block' : 'none';
+    }
+
+    function updateFormSummaryFields() {
+      const sendTo = document.getElementById('actionFormSendTo')?.value || 'admin';
+      const adminGroup = document.getElementById('actionFormAdminGroup');
+      const confirmGroup = document.getElementById('actionFormConfirmGroup');
+      if (adminGroup) adminGroup.style.display = (sendTo === 'admin' || sendTo === 'both') ? 'block' : 'none';
+      if (confirmGroup) confirmGroup.style.display = sendTo === 'admin' ? 'block' : 'none';
     }
 
     async function saveRule() {
@@ -6747,6 +7566,31 @@ app.get('/', (c) => {
           break;
         }
         case 'clear_state': actionParams = { text: document.getElementById('actionText')?.value || '' }; break;
+        case 'send_form_summary': {
+          const keys = (document.getElementById('actionFormKeys')?.value || '').trim();
+          const storeCurrent = (document.getElementById('actionFormStoreCurrent')?.value || '').trim();
+          if (!keys && !storeCurrent) {
+            toast('Add at least one stored data key (or save current message as a key)', 'error');
+            return;
+          }
+          const sendTo = document.getElementById('actionFormSendTo')?.value || 'admin';
+          const adminId = parseInt(document.getElementById('actionAdminId')?.value) || 0;
+          if ((sendTo === 'admin' || sendTo === 'both') && !adminId) {
+            toast('Admin User ID is required when sending to admin', 'error');
+            return;
+          }
+          actionParams = {
+            keys,
+            store_current_as: storeCurrent,
+            template: document.getElementById('actionFormTemplate')?.value || '',
+            send_to: sendTo,
+            admin_id: adminId,
+            confirm_text: document.getElementById('actionFormConfirm')?.value || '',
+            clear_keys: document.getElementById('actionFormClearKeys')?.value || 'yes',
+            clear_state: document.getElementById('actionFormClearState')?.value || 'yes',
+          };
+          break;
+        }
       }
 
       setButtonLoading(saveBtn, true, isEditing ? 'Saving...' : 'Adding...');
